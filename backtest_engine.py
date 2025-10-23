@@ -180,6 +180,15 @@ class BacktestStrategyBase:
         price = self.full_data.iloc[self.current_bar_index].close
         return self.portfolio.close_position(ticket, price)
 
+    def log(self, message):
+        """记录日志消息"""
+        if hasattr(self, 'log_queue') and self.log_queue:
+            self.log_queue.put(f"[Strategy] {message}")
+
+    def symbol_select(self, symbol, enable):
+        """模拟MT5的symbol_select方法"""
+        return True  # 在回测中总是返回True
+
     def on_init(self): pass
     def on_tick(self): raise NotImplementedError("Strategy must implement on_tick")
     def on_deinit(self): pass
@@ -188,9 +197,9 @@ class Backtester:
     """
     回测器主类，负责加载策略、循环数据并生成结果。
     """
-    def __init__(self, strategy_info, full_data, params, config, log_queue, start_cash=10000.0):
+    def __init__(self, strategy_info, full_data, params, config, log_queue, start_cash=10000.0, leverage=100):
         self.log_queue = log_queue
-        self.portfolio = SimulatedPortfolio(start_cash=start_cash)
+        self.portfolio = SimulatedPortfolio(start_cash=start_cash, leverage=leverage)
         self.full_data = full_data
         self.strategy = None
 
