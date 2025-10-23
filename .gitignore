@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution / packaging
+/dist/
+/build/
+*.spec
+
+# VS Code
+.vscode/
+.history/
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env
+
+# User-specific files (IMPORTANT for security)
+secret.key
+config.ini

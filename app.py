@@ -13,12 +13,15 @@ import tkinter.font as tkFont
 from queue import Queue, Empty
 from datetime import datetime
 from cryptography.fernet import Fernet
+import pandas as pd
+from backtest_engine import Backtester
 
 from manual import MANUAL_TEXT
 from strategy_guide import GUIDE_TEXT
 from constants import NUM_SLAVES, NUM_MASTERS, STRATEGIES_DIR, CONFIG_FILE, APP_DATA_DIR
 from core_utils import BaseStrategy, encrypt_password, decrypt_password
 from ui_utils import ScrolledFrame, ModifySLTPWindow, StrategyConfigWindow
+from mt5_utils import _connect_mt5
 
 # 尝试导入ttkthemes以实现更现代的Win11风格界面
 try:
@@ -40,32 +43,7 @@ log_queue = Queue()
 account_info_queue = Queue()
 stop_event = threading.Event()
 
-def _connect_mt5(config, log_queue, account_id_str):
-    """
-    辅助函数：连接到单个MT5账户。
-    返回 (ping, mt5_instance, error_code)。
-    """
-    if not all(config.get(k) for k in ['path', 'login', 'password', 'server']):
-        account_info_queue.put({'id': config['account_id'], 'status': 'config_incomplete'})
-        return None, None, None
 
-    start_time = time.perf_counter()
-    initialized = mt5.initialize(
-        path=config['path'],
-        login=int(config['login']),
-        password=config['password'],
-        server=config['server'],
-        timeout=10000
-    )
-    ping = (time.perf_counter() - start_time) * 1000
-
-    if not initialized:
-        error_code, error_desc = mt5.last_error()
-        log_queue.put(f"连接 {account_id_str} 失败: {error_desc} (代码: {error_code})")
-        account_info_queue.put({'id': config['account_id'], 'status': 'error', 'ping': -1})
-        return None, None, error_code
-    
-    return ping, mt5, mt5.RES_S_OK
 
 def _get_account_details(mt5_instance, account_id, ping):
     """辅助函数：获取账户详细信息"""
@@ -632,6 +610,9 @@ class TradeCopierApp(ThemedTk):
         self.create_positions_tab(notebook)
         self.create_log_tab(notebook)
         self.create_manual_tab(notebook)
+
+        self.create_backtest_tab(notebook) # 新增：创建回测标签页
+        notebook.add(self.backtest_tab, text="策略回测")
         
         status_frame = ttk.Frame(self)
         status_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 5))
@@ -1786,6 +1767,151 @@ class TradeCopierApp(ThemedTk):
         if messagebox.askyesno("确认平仓", f"确定要平仓账户 {account_id} 的订单吗？\n\n订单号: {ticket}\n品种: {symbol}"):
             self.log_message(f"正在为账户 {account_id} 发送平仓指令 (订单: {ticket})...")
             task_queue.put({'action': 'CLOSE_SINGLE_TRADE', 'account_id': account_id, 'ticket': ticket})
+
+    def create_backtest_tab(self, notebook):
+        self.backtest_tab = ttk.Frame(notebook, padding=10)
+        self.backtest_tab.columnconfigure(1, weight=1)
+        self.backtest_tab.rowconfigure(0, weight=1)
+
+        # 1. 左侧配置面板
+        config_frame = ttk.LabelFrame(self.backtest_tab, text="回测设置", padding=10)
+        config_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 10))
+
+        # 策略选择
+        ttk.Label(config_frame, text="选择策略:").pack(pady=5)
+        self.backtest_strategy_var = tk.StringVar()
+        strategy_names = sorted(self.available_strategies.keys()) or ['(无可用策略)']
+        self.backtest_strategy_selector = ttk.Combobox(config_frame, textvariable=self.backtest_strategy_var, state="readonly", values=strategy_names)
+        self.backtest_strategy_selector.pack(fill='x', expand=True, pady=5)
+
+        # 品种
+        ttk.Label(config_frame, text="交易品种:").pack(pady=5)
+        self.backtest_symbol_var = tk.StringVar(value="EURUSD")
+        ttk.Entry(config_frame, textvariable=self.backtest_symbol_var).pack(fill='x', expand=True, pady=5)
+
+        # 周期
+        ttk.Label(config_frame, text="K线周期:").pack(pady=5)
+        self.backtest_tf_var = tk.StringVar(value="H1")
+        tf_values = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"]
+        ttk.Combobox(config_frame, textvariable=self.backtest_tf_var, values=tf_values).pack(fill='x', expand=True, pady=5)
+
+        # 日期范围
+        ttk.Label(config_frame, text="开始日期 (YYYY-MM-DD):").pack(pady=5)
+        self.backtest_start_var = tk.StringVar(value="2023-01-01")
+        ttk.Entry(config_frame, textvariable=self.backtest_start_var).pack(fill='x', expand=True, pady=5)
+
+        ttk.Label(config_frame, text="结束日期 (YYYY-MM-DD):").pack(pady=5)
+        self.backtest_end_var = tk.StringVar(value="2024-01-01")
+        ttk.Entry(config_frame, textvariable=self.backtest_end_var).pack(fill='x', expand=True, pady=5)
+
+        # 策略参数按钮
+        ttk.Button(config_frame, text="配置策略参数", command=self.configure_backtest_strategy).pack(fill='x', expand=True, pady=10)
+
+        # 开始回测按钮
+        self.start_backtest_btn = ttk.Button(config_frame, text="开始回测", command=self.start_backtest)
+        self.start_backtest_btn.pack(fill='x', expand=True, ipady=5, pady=10)
+
+        # 2. 右侧结果面板
+        results_frame = ttk.LabelFrame(self.backtest_tab, text="回测报告", padding=10)
+        results_frame.grid(row=0, column=1, sticky='nsew')
+        results_frame.rowconfigure(0, weight=1)
+        results_frame.columnconfigure(0, weight=1)
+
+        self.backtest_results_text = scrolledtext.ScrolledText(results_frame, wrap=tk.WORD, font=("微软雅黑", 10))
+        self.backtest_results_text.pack(fill='both', expand=True)
+        self.backtest_results_text.insert(tk.END, "请配置回测参数并点击“开始回测”。")
+        self.backtest_results_text.config(state="disabled")
+
+    def configure_backtest_strategy(self):
+        selected_strategy_name = self.backtest_strategy_var.get()
+        if not selected_strategy_name or selected_strategy_name == '(无可用策略)':
+            messagebox.showerror("错误", "请先选择一个策略。")
+            return
+
+        strategy_info = self.available_strategies[selected_strategy_name]
+        if not strategy_info.get('params_config'):
+            messagebox.showinfo("提示", f"策略 '{selected_strategy_name}' 无可配置的特定参数。")
+            return
+
+        dummy_account_id = "backtest_config"
+        StrategyConfigWindow(self, self.app_config, log_queue, dummy_account_id, selected_strategy_name, strategy_info['params_config'])
+        self.log_message(f"已为回测配置策略 '{selected_strategy_name}' 的参数。")
+
+    def start_backtest(self):
+        strategy_name = self.backtest_strategy_var.get()
+        symbol = self.backtest_symbol_var.get()
+        timeframe_str = self.backtest_tf_var.get()
+        start_date_str = self.backtest_start_var.get()
+        end_date_str = self.backtest_end_var.get()
+
+        if not all([strategy_name, symbol, timeframe_str, start_date_str, end_date_str]) or strategy_name == '(无可用策略)':
+            messagebox.showerror("错误", "所有回测参数都必须填写。")
+            return
+
+        self.start_backtest_btn.config(state="disabled")
+        self.update_backtest_results("正在准备回测环境，请稍候...\n", overwrite=True)
+        self.log_message(f"开始回测策略 {strategy_name} on {symbol} {timeframe_str}...")
+
+        thread = threading.Thread(target=self._run_backtest_task, args=(strategy_name, symbol, timeframe_str, start_date_str, end_date_str))
+        thread.daemon = True
+        thread.start()
+
+    def _run_backtest_task(self, strategy_name, symbol, timeframe_str, start_date_str, end_date_str):
+        try:
+            strategy_info = self.available_strategies[strategy_name]
+            strategy_info['module_name'] = os.path.basename(strategy_info['path']).replace('.py', '')
+
+            dummy_account_id = "backtest_config"
+            acc_config = {'account_id': dummy_account_id}
+            params = self._prepare_strategy_params(acc_config, {}, strategy_info)
+
+            # 寻找一个可用的MT5配置用于数据下载
+            mt5_config_for_download = None
+            for master_id in self.master_id_map.values():
+                if master_id in self.logged_in_accounts:
+                    mt5_config_for_download = self.app_config[master_id]
+                    break
+            
+            if not mt5_config_for_download:
+                raise ConnectionError("无法找到任何已登录的主账户来下载数据，请至少登录一个主账户。")
+
+            # 将更新UI的任务放入主线程队列
+            self.after(0, lambda: self.update_backtest_results("正在初始化回测引擎...", overwrite=True))
+
+            backtester = Backtester(
+                strategy_info=strategy_info,
+                symbol=symbol,
+                timeframe_str=timeframe_str,
+                start_date_str=start_date_str,
+                end_date_str=end_date_str,
+                params=params,
+                config=self.app_config,
+                mt5_config=mt5_config_for_download,
+                log_queue=log_queue
+            )
+            
+            results = backtester.run()
+
+            self.after(0, lambda: self.update_backtest_results(results, overwrite=True))
+
+        except Exception as e:
+            import traceback
+            error_message = f"回测过程中发生错误：\n{traceback.format_exc()}"
+            self.log_message(error_message)
+            self.after(0, lambda: self.update_backtest_results(error_message, overwrite=True))
+        finally:
+            self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
+
+    def update_backtest_results(self, message, overwrite=False):
+        def task():
+            self.backtest_results_text.config(state="normal")
+            if overwrite:
+                self.backtest_results_text.delete('1.0', tk.END)
+            self.backtest_results_text.insert(tk.END, message + "\n")
+            self.backtest_results_text.see(tk.END)
+            self.backtest_results_text.config(state="disabled")
+        self.after(0, task)
+
 
 if __name__ == "__main__":
     if not os.path.exists(STRATEGIES_DIR):

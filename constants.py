@@ -23,3 +23,7 @@ APP_DATA_DIR = get_app_data_dir()
 STRATEGIES_DIR = get_correct_path('strategies')
 CONFIG_FILE = os.path.join(APP_DATA_DIR, 'config.ini')
 KEY_FILE = os.path.join(APP_DATA_DIR, 'secret.key')
+
+# --- 新增 ---
+# 定义 HDF5 数据库文件的路径
+HDF5_FILE = os.path.join(APP_DATA_DIR, 'historical_data.h5')
