@@ -25,6 +25,10 @@ class DataManager:
         """
         log_queue.put(f"[DataManager] 开始数据同步任务...")
         
+        # 计算总的处理任务数量
+        total_tasks = len(symbols) * len(timeframes)
+        completed_tasks = 0
+        
         ping, mt5_conn, err_code = _connect_mt5(mt5_config, log_queue, f"数据同步")
         if not mt5_conn:
             log_queue.put(f"[DataManager] 错误：无法连接到MT5进行数据同步。错误代码: {err_code}")
@@ -33,7 +37,8 @@ class DataManager:
         try:
             for symbol in symbols:
                 for tf_str in timeframes:
-                    log_queue.put(f"[DataManager] 正在处理 {symbol} - {tf_str}...")
+                    completed_tasks += 1
+                    log_queue.put(f"[DataManager] 正在处理 {symbol} - {tf_str}... (已下载 {completed_tasks}/{total_tasks})")
                     key = f'{symbol.upper()}/{tf_str.upper()}'
                     
                     # 确定下载的时间范围
@@ -68,6 +73,7 @@ class DataManager:
                     timeframe_mt5 = getattr(mt5, f"TIMEFRAME_{tf_str}")
                     
                     # 请求数据
+                    log_queue.put(f"[DataManager] 正在从MT5下载 {symbol} {tf_str} 数据...")
                     rates = mt5_conn.copy_rates_range(symbol, timeframe_mt5, start_date, end_date)
                     
                     if rates is None or len(rates) == 0:
@@ -83,26 +89,9 @@ class DataManager:
                     data_df = data_df[~data_df.index.duplicated(keep='first')]
 
                     # 将新数据追加到HDF5文件
-                    try:
-                        with pd.HDFStore(self.data_path, 'a') as store:
-                            # 使用 'append' 模式来添加数据，不创建列索引
-                            store.append(key, data_df, format='table')
-                    except Exception as hdf_error:
-                        log_queue.put(f"[DataManager] HDF5写入失败，尝试重新创建文件: {hdf_error}")
-                        # 如果HDF5文件损坏，尝试重新创建
-                        try:
-                            backup_path = self.data_path + '.backup'
-                            if os.path.exists(self.data_path):
-                                os.rename(self.data_path, backup_path)
-                                log_queue.put(f"[DataManager] 已备份损坏的文件到: {backup_path}")
-                            
-                            # 重新创建文件并写入数据
-                            with pd.HDFStore(self.data_path, 'w') as new_store:
-                                new_store.append(key, data_df, format='table')
-                            log_queue.put(f"[DataManager] 已重新创建数据文件并写入数据")
-                        except Exception as recreate_error:
-                            log_queue.put(f"[DataManager] 重新创建文件失败: {recreate_error}")
-                            continue
+                    with pd.HDFStore(self.data_path, 'a') as store:
+                        # 使用 'append' 模式来添加数据，但不为所有列创建索引
+                        store.append(key, data_df, format='table', data_columns=[])
                     
                     log_queue.put(f"[DataManager] 成功同步并追加了 {len(data_df)} 条 {symbol} ({tf_str}) 的K线数据。")
                     time.sleep(0.5) # 短暂休眠，防止过于频繁地请求API
@@ -160,72 +149,29 @@ class DataManager:
         try:
             with pd.HDFStore(self.data_path, 'r') as store:
                 for key in store.keys():
-                    # 跳过系统内部键
-                    if key.startswith('/_') or key == '/':
-                        continue
-                        
                     parts = key.strip('/').split('/')
                     if len(parts) == 2:
                         symbol, timeframe = parts
                         try:
-                            # 尝试获取数据信息
-                            try:
-                                # 先尝试获取存储器信息
-                                storer = store.get_storer(key)
-                                if storer is None:
-                                    continue
-                                    
-                                num_rows = storer.nrows
-                                if num_rows == 0:
-                                    continue
-                                
-                                # 尝试读取第一条和最后一条数据
-                                try:
-                                    first_data = store.select(key, start=0, stop=1)
-                                    last_data = store.select(key, start=num_rows-1, stop=num_rows)
-                                    
-                                    if first_data.empty or last_data.empty:
-                                        continue
-                                        
-                                    first_date = first_data.index[0].strftime('%Y-%m-%d')
-                                    last_date = last_data.index[0].strftime('%Y-%m-%d')
-                                    
-                                    datasets.append({
-                                        'symbol': symbol, 
-                                        'timeframe': timeframe,
-                                        'count': num_rows,
-                                        'start_date': first_date,
-                                        'end_date': last_date
-                                    })
-                                    
-                                except Exception as read_error:
-                                    # 如果无法读取数据，至少提供基本信息
-                                    datasets.append({
-                                        'symbol': symbol, 
-                                        'timeframe': timeframe,
-                                        'count': num_rows,
-                                        'start_date': '未知',
-                                        'end_date': '未知'
-                                    })
-                                    
-                            except Exception as storer_error:
-                                print(f"[DataManager] 无法获取 {key} 的存储器信息: {storer_error}")
-                                continue
-                                
-                        except Exception as e:
-                            print(f"[DataManager] 处理 {key} 时出错: {e}")
-                            continue
+                            # 获取更详细的信息
+                            num_rows = store.get_storer(key).nrows
+                            # 为了获取日期范围，我们需要读取部分数据，这可能有点慢
+                            # 这里只读第一条和最后一条来获取范围
+                            first_date = store.select(key, start=0, stop=1).index[0].strftime('%Y-%m-%d')
+                            last_date = store.select(key, start=num_rows-1, stop=num_rows).index[0].strftime('%Y-%m-%d')
+                            
+                            datasets.append({
+                                'symbol': symbol, 
+                                'timeframe': timeframe,
+                                'count': num_rows,
+                                'start_date': first_date,
+                                'end_date': last_date
+                            })
+                        except (IndexError, KeyError) as e:
+                             print(f"[DataManager] 无法获取 {key} 的详细信息: {e}")
+                             continue
 
         except Exception as e:
             print(f"[DataManager] 扫描本地数据仓库时出错: {e}")
-            # 如果HDF5文件损坏，尝试重新创建
-            try:
-                print(f"[DataManager] 尝试重新创建数据文件...")
-                if os.path.exists(self.data_path):
-                    backup_path = self.data_path + '.backup'
-                    os.rename(self.data_path, backup_path)
-                    print(f"[DataManager] 已备份损坏的文件到: {backup_path}")
-            except Exception as backup_error:
-                print(f"[DataManager] 备份文件时出错: {backup_error}")
         
         return sorted(datasets, key=lambda x: (x['symbol'], x['timeframe']))

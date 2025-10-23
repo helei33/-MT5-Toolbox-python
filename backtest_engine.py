@@ -148,6 +148,59 @@ class BacktestStrategyBase:
         self.current_bar_index = 0
         self.mt5 = self
         self.active = True
+        
+        # 初始化MT5常量
+        self._init_mt5_constants()
+
+    def _init_mt5_constants(self):
+        """初始化MT5常量"""
+        # 时间周期常量
+        self.TIMEFRAME_M1 = 1
+        self.TIMEFRAME_M2 = 2
+        self.TIMEFRAME_M3 = 3
+        self.TIMEFRAME_M4 = 4
+        self.TIMEFRAME_M5 = 5
+        self.TIMEFRAME_M6 = 6
+        self.TIMEFRAME_M10 = 10
+        self.TIMEFRAME_M12 = 12
+        self.TIMEFRAME_M15 = 15
+        self.TIMEFRAME_M20 = 20
+        self.TIMEFRAME_M30 = 30
+        self.TIMEFRAME_H1 = 16385
+        self.TIMEFRAME_H2 = 16386
+        self.TIMEFRAME_H3 = 16387
+        self.TIMEFRAME_H4 = 16388
+        self.TIMEFRAME_H6 = 16390
+        self.TIMEFRAME_H8 = 16392
+        self.TIMEFRAME_H12 = 16396
+        self.TIMEFRAME_D1 = 16408
+        self.TIMEFRAME_W1 = 32769
+        self.TIMEFRAME_MN1 = 49153
+        
+        # 订单类型常量
+        self.ORDER_TYPE_BUY = 0
+        self.ORDER_TYPE_SELL = 1
+        self.ORDER_TYPE_BUY_LIMIT = 2
+        self.ORDER_TYPE_SELL_LIMIT = 3
+        self.ORDER_TYPE_BUY_STOP = 4
+        self.ORDER_TYPE_SELL_STOP = 5
+        
+        # 持仓类型常量
+        self.POSITION_TYPE_BUY = 0
+        self.POSITION_TYPE_SELL = 1
+        
+        # 交易操作常量
+        self.TRADE_ACTION_DEAL = 1
+        self.TRADE_ACTION_PENDING = 5
+        self.TRADE_ACTION_SLTP = 6
+        self.TRADE_ACTION_MODIFY = 7
+        self.TRADE_ACTION_REMOVE = 8
+        
+        # 交易请求结果
+        self.TRADE_RETCODE_DONE = 10009
+        self.TRADE_RETCODE_REJECT = 10004
+        self.TRADE_RETCODE_ERROR = 10027
+        self.TRADE_RETCODE_INVALID = 10007
 
     def stop(self):
         self.active = False
@@ -189,6 +242,32 @@ class BacktestStrategyBase:
         """模拟MT5的symbol_select方法"""
         return True  # 在回测中总是返回True
 
+    def history_deals_get(self, from_ticket=0, count=100):
+        """获取历史成交记录（模拟）"""
+        if not hasattr(self, 'portfolio') or not self.portfolio:
+            return None
+        
+        # 从投资组合的交易历史中获取成交记录
+        deals = []
+        for trade in self.portfolio.trade_history:
+            # 创建模拟的成交记录对象
+            deal = type('Deal', (), {
+                'ticket': trade['ticket'],
+                'magic': trade['magic'],
+                'entry': 1 if trade['action'] == 'close' else 0,  # 0=开仓, 1=平仓
+                'profit': trade.get('profit', 0.0),
+                'swap': trade.get('swap', 0.0),
+                'commission': trade.get('commission', 0.0),
+                'symbol': trade['symbol'],
+                'type': trade['type'],
+                'volume': trade['volume'],
+                'price': trade['price'],
+                'time': trade.get('time', 0)
+            })()
+            deals.append(deal)
+        
+        return deals
+
     def on_init(self): pass
     def on_tick(self): raise NotImplementedError("Strategy must implement on_tick")
     def on_deinit(self): pass
@@ -197,11 +276,13 @@ class Backtester:
     """
     回测器主类，负责加载策略、循环数据并生成结果。
     """
-    def __init__(self, strategy_info, full_data, params, config, log_queue, start_cash=10000.0, leverage=100):
+    def __init__(self, strategy_info, full_data, params, config, log_queue, start_cash=10000.0, leverage=100, stop_event=None, pause_event=None):
         self.log_queue = log_queue
         self.portfolio = SimulatedPortfolio(start_cash=start_cash, leverage=leverage)
         self.full_data = full_data
         self.strategy = None
+        self.stop_event = stop_event
+        self.pause_event = pause_event
 
         self._prepare_strategy(strategy_info, config, params)
 
@@ -237,6 +318,16 @@ class Backtester:
         self.strategy.on_init()
 
         for i in range(len(self.full_data)):
+            # 支持暂停
+            if self.pause_event is not None:
+                while self.pause_event.is_set():
+                    if self.stop_event is not None and self.stop_event.is_set():
+                        break
+                    time.sleep(0.05)
+            # 支持停止
+            if self.stop_event is not None and self.stop_event.is_set():
+                self.log_queue.put("收到停止指令，正在结束回测...")
+                break
             self.strategy.current_bar_index = i
             bar = self.full_data.iloc[i]
             

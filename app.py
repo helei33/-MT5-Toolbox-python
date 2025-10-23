@@ -14,6 +14,7 @@ from queue import Queue, Empty
 from datetime import datetime
 from cryptography.fernet import Fernet
 import pandas as pd
+import traceback # <-- 新增导入
 from backtest_engine import Backtester
 from data_manager import DataManager
 
@@ -250,6 +251,201 @@ def _copy_trades_for_slave(self, slave_id, slave_config, master_trades_dict, mas
     finally:
         if mt5_conn: mt5_conn.shutdown()
 
+class BacktestWindow(tk.Toplevel):
+    def __init__(self, master, app_instance, strategy_name, strategy_info):
+        super().__init__(master)
+        self.title(f"策略回测 - {strategy_name}")
+        self.geometry("700x600")
+        self.transient(master)
+        self.grab_set()
+
+        self.app = app_instance
+        self.log_queue = app_instance.log_queue
+        self.strategy_name = strategy_name
+        self.strategy_info = strategy_info
+        self.params_config = strategy_info.get('params_config', {})
+
+        # --- 1. 创建参数框 ---
+        params_frame = ttk.LabelFrame(self, text="回测参数", padding=10)
+        params_frame.pack(fill=tk.X, padx=10, pady=10)
+        params_frame.columnconfigure(1, weight=1)
+        params_frame.columnconfigure(3, weight=1)
+
+        # 辅助函数，用于从策略默认配置中获取值
+        def get_default(key):
+            return self.params_config.get(key, {}).get('default', '')
+
+        # 定义 StringVars
+        self.symbol_var = tk.StringVar(value=get_default('symbol'))
+        self.timeframe_var = tk.StringVar(value=get_default('timeframe'))
+        self.start_date_var = tk.StringVar(value="2023-01-01")
+        self.end_date_var = tk.StringVar(value=datetime.now().strftime('%Y-%m-%d'))
+        self.cash_var = tk.StringVar(value="10000")
+
+        # 布局UI
+        ttk.Label(params_frame, text="交易品种:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Entry(params_frame, textvariable=self.symbol_var).grid(row=0, column=1, sticky=tk.EW, padx=5, pady=2)
+        
+        ttk.Label(params_frame, text="初始资金:").grid(row=0, column=2, sticky=tk.W, padx=5, pady=2)
+        ttk.Entry(params_frame, textvariable=self.cash_var).grid(row=0, column=3, sticky=tk.EW, padx=5, pady=2)
+
+        ttk.Label(params_frame, text="K线周期:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Entry(params_frame, textvariable=self.timeframe_var).grid(row=1, column=1, sticky=tk.EW, padx=5, pady=2)
+
+        ttk.Label(params_frame, text="开始日期 (Y-m-d):").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Entry(params_frame, textvariable=self.start_date_var).grid(row=2, column=1, sticky=tk.EW, padx=5, pady=2)
+
+        ttk.Label(params_frame, text="结束日期 (Y-m-d):").grid(row=2, column=2, sticky=tk.W, padx=5, pady=2)
+        ttk.Entry(params_frame, textvariable=self.end_date_var).grid(row=2, column=3, sticky=tk.EW, padx=5, pady=2)
+
+        # --- 2. 创建控制按钮 ---
+        control_frame = ttk.Frame(self)
+        control_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        control_frame.columnconfigure(0, weight=1)
+        control_frame.columnconfigure(1, weight=1)
+
+        self.download_btn = ttk.Button(control_frame, text="1. 下载数据 (使用主账户1)", command=self.start_download_thread)
+        self.download_btn.grid(row=0, column=0, sticky=tk.EW, padx=(0, 5), ipady=5)
+        
+        self.run_btn = ttk.Button(control_frame, text="2. 开始回测", command=self.start_backtest_thread)
+        self.run_btn.grid(row=0, column=1, sticky=tk.EW, padx=(5, 0), ipady=5)
+
+        # --- 3. 创建报告区域 ---
+        report_frame = ttk.LabelFrame(self, text="回测报告", padding=10)
+        report_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        report_frame.rowconfigure(0, weight=1)
+        report_frame.columnconfigure(0, weight=1)
+
+        self.report_text = scrolledtext.ScrolledText(report_frame, wrap=tk.WORD, state="disabled", font=("微软雅黑", 10))
+        self.report_text.grid(row=0, column=0, sticky="nsew")
+
+    def _log_to_report(self, message):
+        """安全地在ScrolledText中记录日志"""
+        def task():
+            self.report_text.config(state="normal")
+            self.report_text.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+            self.report_text.see(tk.END)
+            self.report_text.config(state="disabled")
+        self.app.after(0, task) # 确保在主线程中更新UI
+
+    def start_download_thread(self):
+        self.download_btn.config(state="disabled", text="正在下载...")
+        self._log_to_report("开始下载数据任务...")
+        threading.Thread(target=self._download_thread_target, daemon=True).start()
+
+    def _download_thread_target(self):
+        try:
+            symbol = self.symbol_var.get()
+            tf = self.timeframe_var.get()
+            start = self.start_date_var.get()
+            end = self.end_date_var.get()
+
+            if not all([symbol, tf, start, end]):
+                self._log_to_report("错误：所有参数均不能为空。")
+                return
+
+            mt5_config = self.app.app_config['master1']
+            if not all(mt5_config.get(k) for k in ['path', 'login', 'password', 'server']):
+                self._log_to_report("错误：主账户1 (Master 1) 配置不完整，无法用于下载数据。")
+                return
+
+            self._log_to_report(f"使用主账户1连接MT5以下载 {symbol} ({tf}) 从 {start} 到 {end} 的数据...")
+            
+            data_manager = DataManager()
+            success = data_manager.sync_data(
+                symbols=[symbol], 
+                timeframes=[tf], 
+                mt5_config=mt5_config, 
+                log_queue=self.log_queue, # 使用主APP的日志队列
+                start_date_str=start, 
+                end_date_str=end
+            )
+            
+            if success:
+                self._log_to_report(f"数据同步完成。")
+            else:
+                self._log_to_report(f"数据同步失败，请检查主APP日志。")
+
+        except Exception as e:
+            self._log_to_report(f"下载线程出错: {e}\n{traceback.format_exc()}")
+        finally:
+            self.app.after(0, lambda: self.download_btn.config(state="normal", text="1. 下载数据 (使用主账户1)"))
+
+    def start_backtest_thread(self):
+        self.run_btn.config(state="disabled", text="正在回测...")
+        self.report_text.config(state="normal")
+        self.report_text.delete("1.0", tk.END)
+        self.report_text.config(state="disabled")
+        self._log_to_report(f"开始策略 [{self.strategy_name}] 的回测...")
+        threading.Thread(target=self._backtest_thread_target, daemon=True).start()
+
+    def _backtest_thread_target(self):
+        try:
+            # 1. 获取UI参数
+            symbol = self.symbol_var.get()
+            tf = self.timeframe_var.get()
+            start = self.start_date_var.get()
+            end = self.end_date_var.get()
+            try:
+                cash = float(self.cash_var.get())
+            except ValueError:
+                self._log_to_report("错误：初始资金必须是一个数字。")
+                return
+
+            # 2. 从DataManager获取数据
+            self._log_to_report(f"正在从本地数据库加载 {symbol} ({tf}) 数据...")
+            data_manager = DataManager()
+            data = data_manager.get_data(symbol, tf, start, end)
+
+            if data is None or data.empty:
+                self._log_to_report(f"错误：本地未找到所需数据。请先点击'下载数据'按钮。")
+                return
+
+            self._log_to_report(f"成功加载 {len(data)} 条K线数据。")
+
+            # 3. 准备策略参数 (关键步骤)
+            # 加载策略的全局默认参数
+            raw_params = {}
+            global_section = f"{self.strategy_name}_Global"
+            
+            for key, config in self.params_config.items():
+                raw_params[key] = self.app.app_config.get(
+                    global_section, 
+                    key, 
+                    fallback=config.get('default')
+                )
+
+            # 使用回测UI的值覆盖 'symbol' 和 'timeframe'
+            self._log_to_report(f"使用回测参数覆盖策略默认值: Symbol='{symbol}', Timeframe='{tf}'")
+            raw_params['symbol'] = symbol
+            raw_params['timeframe'] = tf
+            
+            # 4. 运行回测
+            self._log_to_report("正在实例化回测引擎并准备策略...")
+            dummy_config = {'account_id': 'backtest'} # 回测策略不需要真实的账户配置
+            
+            backtester = Backtester(
+                strategy_info=self.strategy_info,
+                full_data=data,
+                raw_params=raw_params, # <-- 传递原始参数
+                config=dummy_config,
+                log_queue=self.log_queue, # 使用主APP的日志队列
+                start_cash=cash
+            )
+
+            self._log_to_report("回测引擎启动...")
+            report = backtester.run() # 运行回测
+
+            # 5. 显示报告
+            self._log_to_report("回测完成！")
+            self._log_to_report("\n" + "="*30 + "\n")
+            self._log_to_report(report)
+
+        except Exception as e:
+            self._log_to_report(f"回测线程出错: {e}\n{traceback.format_exc()}")
+        finally:
+            self.app.after(0, lambda: self.run_btn.config(state="normal", text="2. 开始回测"))
+
 class TradeCopierApp(ThemedTk):
     def __init__(self):
         super().__init__()
@@ -419,6 +615,56 @@ class TradeCopierApp(ThemedTk):
             strategy.join(timeout=5)
             if account_id in self.strategy_instances:
                 del self.strategy_instances[account_id]
+
+    def data_sync_worker_thread(self):
+        """数据同步处理线程，处理data_task_queue中的任务"""
+        data_log_queue.put("[DataManager] 数据同步线程已启动")
+        
+        while not stop_event.is_set():
+            try:
+                try:
+                    task = data_task_queue.get(block=False)
+                    symbols = task.get('symbols', [])
+                    timeframes = task.get('timeframes', [])
+                    start_date = task.get('start_date')
+                    end_date = task.get('end_date')
+                    
+                    data_log_queue.put(f"[DataManager] 开始处理数据同步任务: {symbols} {timeframes}")
+                    
+                    # 使用主账户1的配置进行数据同步
+                    try:
+                        master1_config = self.app_config['master1']
+                        if not all(master1_config.get(k) for k in ['path', 'login', 'password', 'server']):
+                            data_log_queue.put("[DataManager] 错误: 主账户1配置不完整，请先配置主账户1")
+                            continue
+                    except KeyError:
+                        data_log_queue.put("[DataManager] 错误: 找不到主账户1配置，请先配置主账户1")
+                        continue
+                    
+                    # 调用数据管理器的同步方法
+                    data_log_queue.put("[DataManager] 正在连接MT5服务器...")
+                    success = self.data_manager.sync_data(
+                        symbols=symbols,
+                        timeframes=timeframes,
+                        mt5_config=master1_config,
+                        log_queue=data_log_queue,
+                        start_date_str=start_date,
+                        end_date_str=end_date
+                    )
+                    
+                    if success:
+                        data_log_queue.put("[DataManager] 数据同步任务完成")
+                    else:
+                        data_log_queue.put("[DataManager] 数据同步任务失败")
+                        
+                except Empty:
+                    pass
+                    
+            except Exception as e:
+                import traceback
+                data_log_queue.put(f"[DataManager] 数据同步线程发生错误: {e}\n{traceback.format_exc()}")
+            finally:
+                time.sleep(0.1)  # 短暂休眠
 
     def _process_logged_in_accounts(self):
         MAX_CONN_FAILURES = 10
@@ -620,13 +866,11 @@ class TradeCopierApp(ThemedTk):
         self.create_strategy_tab(notebook)
         self.create_strategy_guide_tab(notebook) # 新增：创建策略开发说明标签页
         self.create_data_center_tab(notebook) # 新增：创建数据中心标签页
+        self.create_backtest_tab(notebook) # 新增：创建策略回测标签页
         self.create_positions_tab(notebook)
         self.create_log_tab(notebook)
         self.create_manual_tab(notebook)
 
-        self.create_backtest_tab(notebook) # 新增：创建回测标签页
-        notebook.add(self.backtest_tab, text="策略回测")
-        
         status_frame = ttk.Frame(self)
         status_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 5))
         self.status_var = tk.StringVar(value="就绪 - 等待操作")
@@ -1111,7 +1355,11 @@ class TradeCopierApp(ThemedTk):
         mng_btn_frame.grid(row=1, column=0, sticky='ew', pady=(10,0))
         ttk.Button(mng_btn_frame, text="导入", command=self.import_strategy).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         ttk.Button(mng_btn_frame, text="删除", command=self.delete_strategy).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(mng_btn_frame, text="刷新", command=lambda: (self.discover_strategies(), self.refresh_all_strategy_uis())).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2) # 移除开发说明按钮
+        ttk.Button(mng_btn_frame, text="刷新", command=lambda: (self.discover_strategies(), self.refresh_all_strategy_uis())).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        
+        # --- *** 新增回测按钮 *** ---
+        ttk.Button(mng_btn_frame, text="回测策略", command=self.open_backtest_window).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        # --- *** 结束修改 *** ---
         
         right_frame = ttk.LabelFrame(main_pane, text="策略参数（全局默认）", padding=10)
         main_pane.add(right_frame, weight=1)
@@ -1214,9 +1462,9 @@ class TradeCopierApp(ThemedTk):
         quick_select_frame = ttk.Frame(control_frame)
         quick_select_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         ttk.Label(quick_select_frame, text="快速选择:").pack(side=tk.LEFT)
-        ttk.Button(quick_select_frame, text="最近1年", command=lambda: self.set_quick_date_range(365)).pack(side=tk.LEFT, padx=(10, 5))
-        ttk.Button(quick_select_frame, text="最近6个月", command=lambda: self.set_quick_date_range(180)).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(quick_select_frame, text="最近3个月", command=lambda: self.set_quick_date_range(90)).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(quick_select_frame, text="最近1年", command=lambda: self.set_data_quick_date_range(365)).pack(side=tk.LEFT, padx=(10, 5))
+        ttk.Button(quick_select_frame, text="最近6个月", command=lambda: self.set_data_quick_date_range(180)).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(quick_select_frame, text="最近3个月", command=lambda: self.set_data_quick_date_range(90)).pack(side=tk.LEFT, padx=(0, 5))
         
         # 控制按钮
         button_frame = ttk.Frame(control_frame)
@@ -1239,6 +1487,18 @@ class TradeCopierApp(ThemedTk):
         ttk.Label(progress_frame, text="状态:").grid(row=0, column=0, sticky="w")
         self.data_sync_status_label = ttk.Label(progress_frame, textvariable=self.data_sync_progress_var)
         self.data_sync_status_label.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        
+        # 添加确定性进度条
+        self.data_sync_progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=300)
+        self.data_sync_progress_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        
+        # 进度百分比标签
+        self.data_sync_progress_label = ttk.Label(progress_frame, text="0%")
+        self.data_sync_progress_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        
+        # 配置状态标签
+        self.data_sync_config_label = ttk.Label(progress_frame, text="", foreground="red")
+        self.data_sync_config_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 0))
         
         # 数据仓库信息
         info_frame = ttk.LabelFrame(data_tab, text="本地数据仓库", padding=10)
@@ -1282,6 +1542,542 @@ class TradeCopierApp(ThemedTk):
         # 更新数据需求提示
         self.after(200, self.update_data_requirement_hint)
 
+    def create_backtest_tab(self, notebook):
+        """创建策略回测标签页"""
+        backtest_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(backtest_tab, text="策略回测")
+        backtest_tab.rowconfigure(1, weight=1)
+        backtest_tab.columnconfigure(0, weight=1)
+        
+        # 回测配置区域
+        config_frame = ttk.LabelFrame(backtest_tab, text="回测配置", padding=10)
+        config_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        config_frame.columnconfigure(1, weight=1)
+        
+        # 策略选择
+        ttk.Label(config_frame, text="选择策略:").grid(row=0, column=0, sticky="w", pady=5)
+        self.backtest_strategy_var = tk.StringVar()
+        self.backtest_strategy_selector = ttk.Combobox(config_frame, textvariable=self.backtest_strategy_var, state="readonly")
+        self.backtest_strategy_selector.grid(row=0, column=1, sticky="ew", pady=5, padx=(10, 0))
+        
+        # 交易品种选择
+        ttk.Label(config_frame, text="交易品种:").grid(row=1, column=0, sticky="w", pady=5)
+        self.backtest_symbol_var = tk.StringVar()
+        symbol_options = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "USDCHF"]
+        ttk.Combobox(config_frame, textvariable=self.backtest_symbol_var, values=symbol_options, state="readonly").grid(row=1, column=1, sticky="ew", pady=5, padx=(10, 0))
+        
+        # 时间周期选择
+        ttk.Label(config_frame, text="时间周期:").grid(row=2, column=0, sticky="w", pady=5)
+        self.backtest_tf_var = tk.StringVar()
+        timeframe_options = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+        ttk.Combobox(config_frame, textvariable=self.backtest_tf_var, values=timeframe_options, state="readonly").grid(row=2, column=1, sticky="ew", pady=5, padx=(10, 0))
+        
+        # 日期范围
+        date_frame = ttk.Frame(config_frame)
+        date_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=5)
+        date_frame.columnconfigure(1, weight=1)
+        date_frame.columnconfigure(3, weight=1)
+        
+        ttk.Label(date_frame, text="开始日期:").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        self.backtest_start_var = tk.StringVar(value="2023-01-01")
+        ttk.Entry(date_frame, textvariable=self.backtest_start_var, width=12).grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        
+        ttk.Label(date_frame, text="结束日期:").grid(row=0, column=2, sticky="w", padx=(0, 5))
+        self.backtest_end_var = tk.StringVar(value="2024-01-01")
+        ttk.Entry(date_frame, textvariable=self.backtest_end_var, width=12).grid(row=0, column=3, sticky="ew")
+
+        # 快速选择按钮
+        quick_select_frame = ttk.Frame(config_frame)
+        quick_select_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(5, 5))
+        ttk.Label(quick_select_frame, text="快捷选择:").pack(side=tk.LEFT)
+        ttk.Button(quick_select_frame, text="一天", command=lambda: self.set_backtest_quick_date_range(1)).pack(side=tk.LEFT, padx=(10, 5))
+        ttk.Button(quick_select_frame, text="三天", command=lambda: self.set_backtest_quick_date_range(3)).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(quick_select_frame, text="一周", command=lambda: self.set_backtest_quick_date_range(7)).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(quick_select_frame, text="一个月", command=lambda: self.set_backtest_quick_date_range(30)).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(quick_select_frame, text="三个月", command=lambda: self.set_backtest_quick_date_range(90)).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(quick_select_frame, text="半年", command=lambda: self.set_backtest_quick_date_range(180)).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(quick_select_frame, text="一年", command=lambda: self.set_backtest_quick_date_range(365)).pack(side=tk.LEFT, padx=(0, 5))
+        
+        # 初始资金和杠杆
+        ttk.Label(config_frame, text="初始资金 ($):").grid(row=5, column=0, sticky="w", pady=5)
+        self.backtest_initial_cash_var = tk.StringVar(value="10000")
+        ttk.Entry(config_frame, textvariable=self.backtest_initial_cash_var).grid(row=5, column=1, sticky="ew", pady=5, padx=(10, 0))
+        
+        ttk.Label(config_frame, text="杠杆倍数:").grid(row=6, column=0, sticky="w", pady=5)
+        self.backtest_leverage_var = tk.StringVar(value="100")
+        leverage_values = ["10", "20", "50", "100", "200", "500"]
+        ttk.Combobox(config_frame, textvariable=self.backtest_leverage_var, values=leverage_values, state="readonly").grid(row=6, column=1, sticky="ew", pady=5, padx=(10, 0))
+        
+        # 控制按钮
+        button_frame = ttk.Frame(config_frame)
+        button_frame.grid(row=7, column=0, columnspan=2, pady=(10, 0))
+        
+        self.start_backtest_btn = ttk.Button(button_frame, text="开始回测", command=self.start_backtest)
+        self.start_backtest_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.quick_backtest_btn = ttk.Button(button_frame, text="一键智能回测", command=self.quick_backtest)
+        self.quick_backtest_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.stop_backtest_btn = ttk.Button(button_frame, text="停止回测", command=self.stop_backtest, state="disabled")
+        self.stop_backtest_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Button(button_frame, text="清空结果", command=self.clear_backtest_results).pack(side=tk.LEFT)
+        
+        # 回测结果区域
+        result_frame = ttk.LabelFrame(backtest_tab, text="回测结果", padding=10)
+        result_frame.grid(row=1, column=0, sticky="nsew")
+        result_frame.rowconfigure(0, weight=1)
+        result_frame.columnconfigure(0, weight=1)
+        
+        # 结果文本框
+        self.backtest_result_text = scrolledtext.ScrolledText(result_frame, height=20, wrap=tk.WORD)
+        self.backtest_result_text.grid(row=0, column=0, sticky="nsew")
+
+        # 回测进度与状态
+        progress_frame = ttk.Frame(backtest_tab)
+        progress_frame.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        progress_frame.columnconfigure(1, weight=1)
+        ttk.Label(progress_frame, text="进度:").grid(row=0, column=0, sticky="w")
+        self.backtest_progress = ttk.Progressbar(progress_frame, mode="determinate")
+        self.backtest_progress.grid(row=0, column=1, sticky="ew", padx=(8,0))
+        self.backtest_status_var = tk.StringVar(value="就绪")
+        ttk.Label(progress_frame, textvariable=self.backtest_status_var).grid(row=0, column=2, sticky="e", padx=(8,0))
+        
+        # 回测进度百分比标签
+        self.backtest_progress_label = ttk.Label(progress_frame, text="0%")
+        self.backtest_progress_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        
+        # 初始化策略列表
+        self.after(100, self.update_backtest_strategy_list)
+        
+        # 检查数据同步配置状态
+        self.after(200, self.check_data_sync_config)
+        
+        # 设置默认值
+        if symbol_options:
+            self.backtest_symbol_var.set(symbol_options[0])
+        if timeframe_options:
+            self.backtest_tf_var.set(timeframe_options[0])
+
+    def update_backtest_strategy_list(self):
+        """更新回测策略列表"""
+        try:
+            strategy_names = sorted(self.available_strategies.keys()) if self.available_strategies else ['(无可用策略)']
+            self.backtest_strategy_selector['values'] = strategy_names
+            if strategy_names and strategy_names[0] != '(无可用策略)':
+                self.backtest_strategy_selector.current(0)
+        except Exception as e:
+            self.log_message(f"更新回测策略列表时出错: {e}")
+
+    def start_backtest(self):
+        """开始回测"""
+        try:
+            # 获取回测参数
+            strategy_name = self.backtest_strategy_var.get()
+            symbol = self.backtest_symbol_var.get()
+            timeframe_str = self.backtest_tf_var.get()
+            start_date_str = self.backtest_start_var.get()
+            end_date_str = self.backtest_end_var.get()
+            initial_cash = self.backtest_initial_cash_var.get()
+            leverage = self.backtest_leverage_var.get()
+            
+            # 验证参数
+            if not strategy_name or strategy_name == '(无可用策略)':
+                messagebox.showwarning("警告", "请选择一个策略")
+                return
+            
+            if not symbol:
+                messagebox.showwarning("警告", "请选择交易品种")
+                return
+                
+            if not timeframe_str:
+                messagebox.showwarning("警告", "请选择时间周期")
+                return
+                
+            if not start_date_str or not end_date_str:
+                messagebox.showwarning("警告", "请设置开始和结束日期")
+                return
+            
+            # 验证日期格式
+            try:
+                from datetime import datetime
+                datetime.strptime(start_date_str, "%Y-%m-%d")
+                datetime.strptime(end_date_str, "%Y-%m-%d")
+            except ValueError:
+                messagebox.showerror("错误", "日期格式不正确，请使用 YYYY-MM-DD 格式")
+                return
+            
+            # 验证数值参数
+            try:
+                initial_cash = float(initial_cash)
+                leverage = int(leverage)
+                if initial_cash <= 0 or leverage <= 0:
+                    raise ValueError("初始资金和杠杆倍数必须大于0")
+            except ValueError as e:
+                messagebox.showerror("错误", f"回测参数无效: {e}")
+                return
+            
+            # 禁用按钮
+            self.start_backtest_btn.config(state="disabled")
+            self.update_backtest_results("正在检查所需数据...\n", overwrite=True)
+            
+            # 检查数据是否存在
+            data_exists = self.check_backtest_data(symbol, timeframe_str, start_date_str, end_date_str)
+            
+            if not data_exists:
+                # 自动发起同步，下载完成后自动开始回测
+                self.update_backtest_results(f"数据缺失，正在下载 {symbol} {timeframe_str} ({start_date_str}~{end_date_str})，请稍等...\n", overwrite=True)
+                self.backtest_status_var.set("数据下载中...")
+                if hasattr(self, 'backtest_progress'):
+                    # 数据下载时使用确定性模式
+                    self.backtest_progress.config(mode='determinate')
+                    self.backtest_progress['value'] = 0
+                    self.backtest_progress_label.config(text="0%")
+                self.stop_backtest_btn.config(state="disabled")
+                # 创建同步任务
+                sync_task = {
+                    'symbols': [symbol],
+                    'timeframes': [timeframe_str],
+                    'start_date': start_date_str,
+                    'end_date': end_date_str
+                }
+                data_task_queue.put(sync_task)
+                # 开线程等待数据到位，然后自动开始回测
+                threading.Thread(target=self._wait_data_ready_and_start_backtest, 
+                               args=(strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage), 
+                               daemon=True).start()
+                return
+            
+            self.update_backtest_results("数据检查通过，正在准备回测环境...\n", overwrite=True)
+            
+            self.log_message(f"开始回测策略 {strategy_name} on {symbol} {timeframe_str} (初始资金: ${initial_cash}, 杠杆: {leverage}x)...")
+            
+            # 创建可中断事件
+            self.backtest_stop_event = threading.Event()
+            self.backtest_pause_event = threading.Event()
+            self.stop_backtest_btn.config(state="normal")
+            if hasattr(self, 'backtest_progress'):
+                # 回测时使用不确定模式
+                self.backtest_progress.config(mode='indeterminate')
+                self.backtest_progress.start(40)
+                self.backtest_progress_label.config(text="回测进行中...")
+            self.backtest_status_var.set("回测进行中...")
+            # 启动回测线程
+            thread = threading.Thread(target=self._run_backtest_task, args=(strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage))
+            thread.daemon = True
+            thread.start()
+            
+        except Exception as e:
+            self.log_message(f"启动回测时出错: {e}")
+            self.start_backtest_btn.config(state="normal")
+
+    def _run_backtest_task(self, strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage):
+        """运行回测任务"""
+        try:
+            # 获取策略信息
+            if strategy_name not in self.available_strategies:
+                self.after(0, lambda: self.update_backtest_results(f"错误: 找不到策略 {strategy_name}", overwrite=True))
+                return
+            
+            strategy_info = self.available_strategies[strategy_name]
+            
+            # 获取策略的默认参数配置
+            default_params = strategy_info.get('params_config', {})
+            
+            # 构建完整的参数，使用策略默认值
+            params = {}
+            for param_name, param_config in default_params.items():
+                if param_name == 'symbol':
+                    params[param_name] = symbol
+                elif param_name == 'timeframe':
+                    params[param_name] = timeframe_str
+                else:
+                    params[param_name] = param_config.get('default', 0)
+            
+            # 确保必要的参数存在
+            if 'trade_volume' not in params:
+                params['trade_volume'] = 0.01
+            if 'magic_number' not in params:
+                params['magic_number'] = 13579
+            if 'stop_loss_pips' not in params:
+                params['stop_loss_pips'] = 50
+            if 'take_profit_pips' not in params:
+                params['take_profit_pips'] = 100
+            
+            self.after(0, lambda: self.update_backtest_results("正在从本地数据仓库获取数据...", overwrite=True))
+            
+            # 从数据管理器获取数据
+            full_data = self.data_manager.get_data(symbol, timeframe_str, start_date_str, end_date_str)
+            
+            if full_data is None or full_data.empty:
+                error_msg = f"在本地数据仓库中没有找到 {symbol} {timeframe_str} 在 {start_date_str} 到 {end_date_str} 期间的数据。\n请先在数据中心同步相关数据。"
+                self.after(0, lambda: self.update_backtest_results(error_msg, overwrite=True))
+                return
+            
+            self.after(0, lambda: self.update_backtest_results(f"成功获取 {len(full_data)} 条K线数据，正在初始化回测引擎...", overwrite=True))
+            
+            # 创建回测器
+            backtester = Backtester(
+                strategy_info=strategy_info,
+                full_data=full_data,
+                params=params,
+                config=self.app_config,
+                log_queue=log_queue,
+                start_cash=float(initial_cash),
+                leverage=int(leverage),
+                stop_event=getattr(self, 'backtest_stop_event', None),
+                pause_event=getattr(self, 'backtest_pause_event', None)
+            )
+            
+            # 运行回测
+            results = backtester.run()
+            self.after(0, lambda: self.update_backtest_results(results, overwrite=True))
+            
+        except Exception as e:
+            error_msg = f"回测过程中发生错误: {e}\n{traceback.format_exc()}"
+            self.after(0, lambda: self.update_backtest_results(error_msg, overwrite=True))
+        finally:
+            self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
+            self.after(0, lambda: self.stop_backtest_btn.config(state="disabled"))
+            if hasattr(self, 'backtest_progress'):
+                self.after(0, lambda: self.backtest_progress.stop())
+            self.after(0, lambda: self.backtest_status_var.set("就绪"))
+
+    def _wait_data_ready_enable_start(self, symbol, timeframe_str, start_date_str, end_date_str):
+        try:
+            start_ts = time.time()
+            timeout = 600
+            while time.time() - start_ts < timeout:
+                if self.check_backtest_data(symbol, timeframe_str, start_date_str, end_date_str):
+                    self.after(0, lambda: self.update_backtest_results("数据下载完成，请点击'开始回测'继续。\n", overwrite=False))
+                    self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
+                    break
+                time.sleep(1.5)
+            else:
+                self.after(0, lambda: self.update_backtest_results("数据下载超时，请稍后重试。\n", overwrite=False))
+        finally:
+            if hasattr(self, 'backtest_progress'):
+                self.after(0, lambda: self.backtest_progress.stop())
+            self.after(0, lambda: self.backtest_status_var.set("就绪"))
+
+    def _wait_data_ready_and_start_backtest(self, strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage):
+        """等待数据下载完成，然后自动开始回测"""
+        try:
+            start_ts = time.time()
+            timeout = 600  # 10分钟超时
+            
+            self.after(0, lambda: self.update_backtest_results("正在等待数据下载完成...\n", overwrite=False))
+            
+            while time.time() - start_ts < timeout:
+                if self.check_backtest_data(symbol, timeframe_str, start_date_str, end_date_str):
+                    self.after(0, lambda: self.update_backtest_results("✓ 数据下载完成，正在启动回测...\n", overwrite=False))
+                    
+                    # 数据下载完成，自动开始回测
+                    self.after(0, lambda: self._run_backtest_task(strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage))
+                    return
+                    
+                time.sleep(2)  # 每2秒检查一次
+            
+            # 超时处理
+            self.after(0, lambda: self.update_backtest_results("✗ 数据下载超时，请检查网络连接或手动同步数据。\n", overwrite=False))
+            self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
+            
+        except Exception as e:
+            self.after(0, lambda: self.update_backtest_results(f"等待数据时发生错误: {e}\n", overwrite=False))
+            self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
+        finally:
+            if hasattr(self, 'backtest_progress'):
+                self.after(0, lambda: self.backtest_progress.stop())
+            self.after(0, lambda: self.backtest_status_var.set("就绪"))
+
+    def stop_backtest(self):
+        try:
+            if hasattr(self, 'backtest_stop_event') and self.backtest_stop_event:
+                self.backtest_stop_event.set()
+                self.update_backtest_results("正在停止回测...\n", overwrite=False)
+        except Exception:
+            pass
+
+    def update_backtest_results(self, message, overwrite=False):
+        """更新回测结果"""
+        try:
+            if overwrite:
+                self.backtest_result_text.delete(1.0, tk.END)
+            self.backtest_result_text.insert(tk.END, message + "\n")
+            self.backtest_result_text.see(tk.END)
+        except Exception as e:
+            self.log_message(f"更新回测结果时出错: {e}")
+
+    def clear_backtest_results(self):
+        """清空回测结果"""
+        try:
+            self.backtest_result_text.delete(1.0, tk.END)
+        except Exception as e:
+            self.log_message(f"清空回测结果时出错: {e}")
+
+    def quick_backtest(self):
+        """一键智能回测 - 自动处理所有数据同步和回测流程"""
+        try:
+            # 获取回测参数
+            strategy_name = self.backtest_strategy_var.get()
+            symbol = self.backtest_symbol_var.get()
+            timeframe_str = self.backtest_tf_var.get()
+            start_date_str = self.backtest_start_var.get()
+            end_date_str = self.backtest_end_var.get()
+            initial_cash = self.backtest_initial_cash_var.get()
+            leverage = self.backtest_leverage_var.get()
+            
+            # 验证参数
+            if not strategy_name or strategy_name == '(无可用策略)':
+                messagebox.showwarning("警告", "请选择一个策略")
+                return
+            
+            if not symbol or not timeframe_str or not start_date_str or not end_date_str:
+                messagebox.showwarning("警告", "请设置完整的回测参数")
+                return
+            
+            # 验证数值参数
+            try:
+                initial_cash = float(initial_cash)
+                leverage = int(leverage)
+                if initial_cash <= 0 or leverage <= 0:
+                    raise ValueError("初始资金和杠杆倍数必须大于0")
+            except ValueError as e:
+                messagebox.showerror("错误", f"回测参数无效: {e}")
+                return
+            
+            # 禁用按钮
+            self.start_backtest_btn.config(state="disabled")
+            self.quick_backtest_btn.config(state="disabled")
+            
+            # 清空结果并显示开始信息
+            self.update_backtest_results("=== 一键智能回测开始 ===\n", overwrite=True)
+            self.update_backtest_results(f"策略: {strategy_name}\n品种: {symbol}\n周期: {timeframe_str}\n时间范围: {start_date_str} 到 {end_date_str}\n", overwrite=False)
+            
+            # 启动智能回测线程
+            thread = threading.Thread(
+                target=self._run_smart_backtest, 
+                args=(strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage)
+            )
+            thread.daemon = True
+            thread.start()
+            
+        except Exception as e:
+            self.log_message(f"启动一键智能回测时出错: {e}")
+            self.start_backtest_btn.config(state="normal")
+            self.quick_backtest_btn.config(state="normal")
+
+    def _run_smart_backtest(self, strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage):
+        """智能回测执行 - 自动处理数据同步和回测"""
+        try:
+            # 步骤1: 检查数据是否存在
+            self.after(0, lambda: self.update_backtest_results("步骤1: 检查本地数据...\n", overwrite=False))
+            
+            data_exists = self.check_backtest_data(symbol, timeframe_str, start_date_str, end_date_str)
+            
+            if not data_exists:
+                # 步骤2: 自动同步数据
+                self.after(0, lambda: self.update_backtest_results("步骤2: 数据缺失，正在自动同步...\n", overwrite=False))
+                
+                # 创建数据同步任务
+                sync_task = {
+                    'symbols': [symbol],
+                    'timeframes': [timeframe_str],
+                    'start_date': start_date_str,
+                    'end_date': end_date_str
+                }
+                data_task_queue.put(sync_task)
+                
+                # 等待数据同步完成
+                self.after(0, lambda: self.update_backtest_results("正在下载历史数据，请稍候...\n", overwrite=False))
+                
+                sync_start_time = time.time()
+                max_wait_time = 300  # 最多等待5分钟
+                
+                while time.time() - sync_start_time < max_wait_time:
+                    if self.check_backtest_data(symbol, timeframe_str, start_date_str, end_date_str):
+                        self.after(0, lambda: self.update_backtest_results("✓ 数据同步完成\n", overwrite=False))
+                        break
+                    time.sleep(2)
+                else:
+                    # 超时
+                    self.after(0, lambda: self.update_backtest_results("✗ 数据同步超时，请检查网络连接\n", overwrite=False))
+                    self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
+                    self.after(0, lambda: self.quick_backtest_btn.config(state="normal"))
+                    return
+            else:
+                self.after(0, lambda: self.update_backtest_results("✓ 本地数据已就绪\n", overwrite=False))
+            
+            # 步骤3: 执行回测
+            self.after(0, lambda: self.update_backtest_results("步骤3: 开始执行回测...\n", overwrite=False))
+            
+            # 获取数据
+            full_data = self.data_manager.get_data(symbol, timeframe_str, start_date_str, end_date_str)
+            
+            if full_data is None or full_data.empty:
+                self.after(0, lambda: self.update_backtest_results("✗ 无法获取数据，回测失败\n", overwrite=False))
+                return
+            
+            self.after(0, lambda: self.update_backtest_results(f"✓ 成功获取 {len(full_data)} 条K线数据\n", overwrite=False))
+            
+            # 获取策略信息
+            if strategy_name not in self.available_strategies:
+                self.after(0, lambda: self.update_backtest_results(f"✗ 错误: 找不到策略 {strategy_name}\n", overwrite=False))
+                return
+            
+            strategy_info = self.available_strategies[strategy_name]
+            
+            # 获取策略的默认参数配置
+            default_params = strategy_info.get('params_config', {})
+            
+            # 构建完整的参数，使用策略默认值
+            params = {}
+            for param_name, param_config in default_params.items():
+                if param_name == 'symbol':
+                    params[param_name] = symbol
+                elif param_name == 'timeframe':
+                    params[param_name] = timeframe_str
+                else:
+                    params[param_name] = param_config.get('default', 0)
+            
+            # 确保必要的参数存在
+            if 'trade_volume' not in params:
+                params['trade_volume'] = 0.01
+            if 'magic_number' not in params:
+                params['magic_number'] = 13579
+            if 'stop_loss_pips' not in params:
+                params['stop_loss_pips'] = 50
+            if 'take_profit_pips' not in params:
+                params['take_profit_pips'] = 100
+            
+            # 创建回测器
+            self.after(0, lambda: self.update_backtest_results("正在初始化回测引擎...\n", overwrite=False))
+            
+            backtester = Backtester(
+                strategy_info=strategy_info,
+                full_data=full_data,
+                params=params,
+                config=self.app_config,
+                log_queue=log_queue,
+                start_cash=float(initial_cash),
+                leverage=int(leverage)
+            )
+            
+            # 运行回测
+            self.after(0, lambda: self.update_backtest_results("正在执行策略回测...\n", overwrite=False))
+            results = backtester.run()
+            
+            # 显示结果
+            self.after(0, lambda: self.update_backtest_results("=== 回测完成 ===\n", overwrite=False))
+            self.after(0, lambda: self.update_backtest_results(results, overwrite=False))
+            
+        except Exception as e:
+            error_msg = f"智能回测过程中发生错误: {e}\n{traceback.format_exc()}"
+            self.after(0, lambda: self.update_backtest_results(f"✗ {error_msg}\n", overwrite=False))
+        finally:
+            self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
+            self.after(0, lambda: self.quick_backtest_btn.config(state="normal"))
+
     def update_data_requirement_hint(self):
         """更新数据需求提示"""
         try:
@@ -1305,14 +2101,46 @@ class TradeCopierApp(ThemedTk):
         except Exception as e:
             self.data_requirement_label.config(text="", foreground="blue")
 
-    def set_quick_date_range(self, days):
-        """设置快速日期范围"""
+    def set_quick_date_range(self, days, start_var, end_var):
+        """为指定的变量设置快速日期范围"""
+        from datetime import datetime, timedelta
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        
+        start_var.set(start_date.strftime("%Y-%m-%d"))
+        end_var.set(end_date.strftime("%Y-%m-%d"))
+
+    def set_backtest_quick_date_range(self, days):
+        """为回测设置快速日期范围"""
+        from datetime import datetime, timedelta
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        
+        self.backtest_start_var.set(start_date.strftime("%Y-%m-%d"))
+        self.backtest_end_var.set(end_date.strftime("%Y-%m-%d"))
+
+    def set_data_quick_date_range(self, days):
+        """为数据中心设置快速日期范围"""
         from datetime import datetime, timedelta
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         
         self.data_start_date_var.set(start_date.strftime("%Y-%m-%d"))
         self.data_end_date_var.set(end_date.strftime("%Y-%m-%d"))
+
+    def check_data_sync_config(self):
+        """检查数据同步配置状态"""
+        try:
+            master1_config = self.app_config['master1']
+            if all(master1_config.get(k) for k in ['path', 'login', 'password', 'server']):
+                self.data_sync_config_label.config(text="✓ 主账户1配置完整", foreground="green")
+                return True
+            else:
+                self.data_sync_config_label.config(text="✗ 主账户1配置不完整", foreground="red")
+                return False
+        except KeyError:
+            self.data_sync_config_label.config(text="✗ 未找到主账户1配置", foreground="red")
+            return False
 
     def discover_strategies(self):
         self.available_strategies = {}
@@ -1346,6 +2174,7 @@ class TradeCopierApp(ThemedTk):
                                 'class': obj, 'params_config': getattr(obj, 'strategy_params_config', {}).copy(),
                                 'description': getattr(obj, 'strategy_description', '作者很懒，没有留下任何说明...').strip(),
                                 'path': filepath,
+                                'module_name': module_name,
                             }
                             log_queue.put(f"  -> 成功发现策略类: {strategy_name}")
                             break
@@ -1468,6 +2297,23 @@ class TradeCopierApp(ThemedTk):
                 if self.app_config.has_option(account_section, key):
                     final_params[key] = self.app_config.get(account_section, key)
         return final_params
+
+    # --- *** 新增方法：打开回测窗口 *** ---
+    def open_backtest_window(self):
+        selection = self.strategy_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("提示", "请先从左侧列表中选择一个策略进行回测。")
+            return
+        
+        strategy_name = self.strategy_listbox.get(selection[0])
+        strategy_info = self.available_strategies.get(strategy_name)
+        if not strategy_info:
+            messagebox.showerror("错误", f"找不到策略 '{strategy_name}' 的信息。")
+            return
+            
+        # 创建并显示回测窗口
+        BacktestWindow(self, self, strategy_name, strategy_info)
+    # --- *** 结束新增方法 *** ---
 
     def on_slave_selected_for_mapping(self, event=None):
         idx = self.mapping_slave_selector.current()
@@ -1739,9 +2585,64 @@ class TradeCopierApp(ThemedTk):
                 # 更新数据同步状态
                 if "[DataManager]" in message:
                     self.data_sync_progress_var.set(message)
+                    # 解析进度消息并更新进度条
+                    self._parse_and_update_progress(message)
         except Empty: pass
         
         self.after(250, self.update_log)
+
+    def _parse_and_update_progress(self, message):
+        """解析数据同步进度消息并更新进度条"""
+        try:
+            # 解析 "已下载 X/Y" 格式的消息
+            if "已下载" in message and "/" in message:
+                import re
+                # 使用正则表达式提取数字
+                match = re.search(r'已下载\s+(\d+)/(\d+)', message)
+                if match:
+                    current = int(match.group(1))
+                    total = int(match.group(2))
+                    
+                    if total > 0:
+                        percentage = (current / total) * 100
+                        # 更新数据中心进度条
+                        self.data_sync_progress_bar['value'] = percentage
+                        self.data_sync_progress_label.config(text=f"{percentage:.1f}%")
+                        
+                        # 如果回测正在进行数据下载，也更新回测进度条
+                        if hasattr(self, 'backtest_progress') and self.backtest_status_var.get() == "数据下载中...":
+                            self.backtest_progress['value'] = percentage
+                            self.backtest_progress_label.config(text=f"{percentage:.1f}%")
+                    else:
+                        self.data_sync_progress_bar['value'] = 0
+                        self.data_sync_progress_label.config(text="0%")
+                        
+            # 处理开始和完成状态
+            elif "开始数据同步任务" in message:
+                self.data_sync_progress_bar['value'] = 0
+                self.data_sync_progress_label.config(text="0%")
+                # 如果回测正在进行数据下载，也重置回测进度条
+                if hasattr(self, 'backtest_progress') and self.backtest_status_var.get() == "数据下载中...":
+                    self.backtest_progress['value'] = 0
+                    self.backtest_progress_label.config(text="0%")
+            elif "所有数据同步任务完成" in message:
+                self.data_sync_progress_bar['value'] = 100
+                self.data_sync_progress_label.config(text="100%")
+                # 如果回测正在进行数据下载，也更新回测进度条
+                if hasattr(self, 'backtest_progress') and self.backtest_status_var.get() == "数据下载中...":
+                    self.backtest_progress['value'] = 100
+                    self.backtest_progress_label.config(text="100%")
+            elif "数据同步任务失败" in message or "错误" in message:
+                self.data_sync_progress_bar['value'] = 0
+                self.data_sync_progress_label.config(text="失败")
+                # 如果回测正在进行数据下载，也更新回测进度条
+                if hasattr(self, 'backtest_progress') and self.backtest_status_var.get() == "数据下载中...":
+                    self.backtest_progress['value'] = 0
+                    self.backtest_progress_label.config(text="失败")
+                
+        except Exception as e:
+            # 如果解析失败，不影响其他功能
+            pass
 
     def log_message(self, message):
         ts = time.strftime('%H:%M:%S')
@@ -1879,6 +2780,10 @@ class TradeCopierApp(ThemedTk):
     def _start_worker_thread(self):
         self.worker = threading.Thread(target=self.worker_thread, daemon=True)
         self.worker.start()
+        
+        # 启动数据同步处理线程
+        self.data_sync_worker = threading.Thread(target=self.data_sync_worker_thread, daemon=True)
+        self.data_sync_worker.start()
 
     def _update_positions_tree(self, tree, positions_data):
         tree.delete(*tree.get_children())
@@ -1949,338 +2854,136 @@ class TradeCopierApp(ThemedTk):
             self.log_message(f"正在为账户 {account_id} 发送平仓指令 (订单: {ticket})...")
             task_queue.put({'action': 'CLOSE_SINGLE_TRADE', 'account_id': account_id, 'ticket': ticket})
 
-    def create_backtest_tab(self, notebook):
-        self.backtest_tab = ttk.Frame(notebook, padding=10)
-        self.backtest_tab.columnconfigure(1, weight=1)
-        self.backtest_tab.rowconfigure(0, weight=1)
-
-        # 1. 左侧配置面板
-        config_frame = ttk.LabelFrame(self.backtest_tab, text="回测设置", padding=10)
-        config_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 10))
-
-        # 策略选择
-        ttk.Label(config_frame, text="选择策略:").pack(pady=5)
-        self.backtest_strategy_var = tk.StringVar()
-        self.backtest_strategy_selector = ttk.Combobox(config_frame, textvariable=self.backtest_strategy_var, state="readonly")
-        self.backtest_strategy_selector.pack(fill='x', expand=True, pady=5)
-        # 延迟更新策略列表
-        self.after(100, self.update_backtest_strategy_list)
-
-        # 品种
-        ttk.Label(config_frame, text="交易品种:").pack(pady=5)
-        self.backtest_symbol_var = tk.StringVar(value="EURUSD")
-        ttk.Entry(config_frame, textvariable=self.backtest_symbol_var).pack(fill='x', expand=True, pady=5)
-
-        # 周期
-        ttk.Label(config_frame, text="K线周期:").pack(pady=5)
-        self.backtest_tf_var = tk.StringVar(value="H1")
-        tf_values = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"]
-        ttk.Combobox(config_frame, textvariable=self.backtest_tf_var, values=tf_values).pack(fill='x', expand=True, pady=5)
-
-        # 日期范围
-        ttk.Label(config_frame, text="开始日期 (YYYY-MM-DD):").pack(pady=5)
-        self.backtest_start_var = tk.StringVar(value="2023-01-01")
-        ttk.Entry(config_frame, textvariable=self.backtest_start_var).pack(fill='x', expand=True, pady=5)
-
-        ttk.Label(config_frame, text="结束日期 (YYYY-MM-DD):").pack(pady=5)
-        self.backtest_end_var = tk.StringVar(value="2024-01-01")
-        ttk.Entry(config_frame, textvariable=self.backtest_end_var).pack(fill='x', expand=True, pady=5)
-
-        # 模拟账户金额
-        ttk.Label(config_frame, text="初始资金 ($):").pack(pady=5)
-        self.backtest_initial_cash_var = tk.StringVar(value="10000")
-        ttk.Entry(config_frame, textvariable=self.backtest_initial_cash_var).pack(fill='x', expand=True, pady=5)
-
-        # 杠杆倍数
-        ttk.Label(config_frame, text="杠杆倍数:").pack(pady=5)
-        self.backtest_leverage_var = tk.StringVar(value="100")
-        leverage_values = ["10", "20", "50", "100", "200", "500"]
-        ttk.Combobox(config_frame, textvariable=self.backtest_leverage_var, values=leverage_values, state="readonly").pack(fill='x', expand=True, pady=5)
-
-        # 策略参数按钮
-        ttk.Button(config_frame, text="配置策略参数", command=self.configure_backtest_strategy).pack(fill='x', expand=True, pady=10)
-
-        # 开始回测按钮
-        self.start_backtest_btn = ttk.Button(config_frame, text="开始回测", command=self.start_backtest)
-        self.start_backtest_btn.pack(fill='x', expand=True, ipady=5, pady=10)
-
-        # 2. 右侧结果面板
-        results_frame = ttk.LabelFrame(self.backtest_tab, text="回测报告", padding=10)
-        results_frame.grid(row=0, column=1, sticky='nsew')
-        results_frame.rowconfigure(0, weight=1)
-        results_frame.columnconfigure(0, weight=1)
-
-        self.backtest_results_text = scrolledtext.ScrolledText(results_frame, wrap=tk.WORD, font=("微软雅黑", 10))
-        self.backtest_results_text.pack(fill='both', expand=True)
-        self.backtest_results_text.insert(tk.END, "请配置回测参数并点击“开始回测”。")
-        self.backtest_results_text.config(state="disabled")
-
-    def configure_backtest_strategy(self):
-        selected_strategy_name = self.backtest_strategy_var.get()
-        if not selected_strategy_name or selected_strategy_name == '(无可用策略)':
-            messagebox.showerror("错误", "请先选择一个策略。")
-            return
-
-        strategy_info = self.available_strategies[selected_strategy_name]
-        if not strategy_info.get('params_config'):
-            messagebox.showinfo("提示", f"策略 '{selected_strategy_name}' 无可配置的特定参数。")
-            return
-
-        dummy_account_id = "backtest_config"
-        StrategyConfigWindow(self, self.app_config, log_queue, dummy_account_id, selected_strategy_name, strategy_info['params_config'])
-        self.log_message(f"已为回测配置策略 '{selected_strategy_name}' 的参数。")
-
     def start_data_sync(self):
         """开始数据同步"""
-        # 获取选中的交易品种和时间周期
-        selected_symbols = [symbol for symbol, var in self.data_symbol_vars.items() if var.get()]
-        selected_timeframes = [tf for tf, var in self.data_timeframe_vars.items() if var.get()]
-        
-        if not selected_symbols or not selected_timeframes:
-            messagebox.showwarning("提示", "请至少选择一个交易品种和一个时间周期。")
-            return
-        
-        # 获取时间范围
-        start_date_str = self.data_start_date_var.get()
-        end_date_str = self.data_end_date_var.get()
-        
-        if not start_date_str or not end_date_str:
-            messagebox.showwarning("提示", "请指定开始和结束日期。")
-            return
-        
         try:
-            from datetime import datetime
-            start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
-            end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
-            
-            if start_date >= end_date:
-                messagebox.showwarning("提示", "开始日期必须早于结束日期。")
+            # 获取选中的交易品种
+            selected_symbols = [symbol for symbol, var in self.data_symbol_vars.items() if var.get()]
+            if not selected_symbols:
+                messagebox.showwarning("警告", "请至少选择一个交易品种")
                 return
-                
-        except ValueError:
-            messagebox.showerror("错误", "日期格式不正确，请使用 YYYY-MM-DD 格式。")
-            return
-        
-        # 禁用按钮，启动进度条
-        self.start_sync_button.config(state="disabled")
-        self.stop_sync_button.config(state="normal")
-        self.data_sync_in_progress = True
-        self.data_sync_progress_var.set("正在启动数据同步...")
-        
-        # 创建数据同步任务
-        sync_task = {
-            'symbols': selected_symbols,
-            'timeframes': selected_timeframes,
-            'start_date': start_date_str,
-            'end_date': end_date_str
-        }
-        
-        # 将任务放入队列
-        data_task_queue.put(sync_task)
-        
-        # 启动数据工作线程（如果还没有启动）
-        if not hasattr(self, 'data_worker_thread') or not self.data_worker_thread.is_alive():
-            self.data_worker_thread = threading.Thread(target=self.data_worker_thread_func, daemon=True)
-            self.data_worker_thread.start()
-        
-        self.log_message(f"开始同步数据: {selected_symbols} - {selected_timeframes} ({start_date_str} 到 {end_date_str})")
+            
+            # 获取选中的时间周期
+            selected_timeframes = [tf for tf, var in self.data_timeframe_vars.items() if var.get()]
+            if not selected_timeframes:
+                messagebox.showwarning("警告", "请至少选择一个时间周期")
+                return
+            
+            # 获取日期范围
+            start_date_str = self.data_start_date_var.get()
+            end_date_str = self.data_end_date_var.get()
+            
+            if not start_date_str or not end_date_str:
+                messagebox.showwarning("警告", "请设置开始和结束日期")
+                return
+            
+            # 验证日期格式
+            try:
+                from datetime import datetime
+                datetime.strptime(start_date_str, "%Y-%m-%d")
+                datetime.strptime(end_date_str, "%Y-%m-%d")
+            except ValueError:
+                messagebox.showerror("错误", "日期格式不正确，请使用 YYYY-MM-DD 格式")
+                return
+            
+            # 检查配置状态
+            if not self.check_data_sync_config():
+                messagebox.showerror("错误", "主账户1配置不完整，请先配置主账户1后再进行数据同步")
+                return
+            
+            # 禁用按钮，启用停止按钮
+            self.start_sync_button.config(state="disabled")
+            self.stop_sync_button.config(state="normal")
+            self.data_sync_in_progress = True
+            self.data_sync_progress_var.set("正在准备同步...")
+            
+            # 重置进度条
+            self.data_sync_progress_bar['value'] = 0
+            self.data_sync_progress_label.config(text="0%")
+            
+            # 创建同步任务
+            sync_task = {
+                'symbols': selected_symbols,
+                'timeframes': selected_timeframes,
+                'start_date': start_date_str,
+                'end_date': end_date_str
+            }
+            
+            # 将任务放入队列
+            data_task_queue.put(sync_task)
+            
+            self.log_message(f"开始同步数据: {selected_symbols} {selected_timeframes} ({start_date_str} 到 {end_date_str})")
+            
+        except Exception as e:
+            self.log_message(f"启动数据同步时出错: {e}")
+            self.start_sync_button.config(state="normal")
+            self.stop_sync_button.config(state="disabled")
+            self.data_sync_in_progress = False
 
     def stop_data_sync(self):
         """停止数据同步"""
-        self.data_sync_in_progress = False
-        self.start_sync_button.config(state="normal")
-        self.stop_sync_button.config(state="disabled")
-        self.data_sync_progress_var.set("已停止")
-        self.log_message("数据同步已停止")
+        try:
+            self.data_sync_in_progress = False
+            self.start_sync_button.config(state="normal")
+            self.stop_sync_button.config(state="disabled")
+            self.data_sync_progress_var.set("已停止")
+            self.log_message("数据同步已停止")
+        except Exception as e:
+            self.log_message(f"停止数据同步时出错: {e}")
 
-    def data_worker_thread_func(self):
-        """数据工作线程函数"""
-        while True:
-            try:
-                # 等待数据同步任务
-                sync_task = data_task_queue.get(timeout=1)
-                
-                if not self.data_sync_in_progress:
-                    continue
-                
-                symbols = sync_task['symbols']
-                timeframes = sync_task['timeframes']
-                start_date_str = sync_task.get('start_date')
-                end_date_str = sync_task.get('end_date')
-                
-                # 获取第一个主账户的配置作为MT5连接配置
-                master_config = None
-                for i in range(1, NUM_MASTERS + 1):
-                    master_id = f'master{i}'
-                    if master_id in self.app_config:
-                        master_config = dict(self.app_config[master_id])
-                        break
-                
-                if not master_config:
-                    data_log_queue.put("[DataManager] 错误：没有找到可用的主账户配置")
-                    continue
-                
-                # 调用数据管理器的同步方法
-                success = self.data_manager.sync_data(symbols, timeframes, master_config, data_log_queue, start_date_str, end_date_str)
-                
-                if success:
-                    data_log_queue.put("[DataManager] 数据同步完成")
-                    # 刷新数据列表
-                    self.after(0, self.refresh_data_list)
-                else:
-                    data_log_queue.put("[DataManager] 数据同步失败")
-                
-            except Empty:
-                continue
-            except Exception as e:
-                data_log_queue.put(f"[DataManager] 数据工作线程错误: {e}")
-                continue
+    def set_quick_date_range(self, days):
+        """设置快速日期范围"""
+        try:
+            from datetime import datetime, timedelta
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
+            self.data_start_date_var.set(start_date.strftime("%Y-%m-%d"))
+            self.data_end_date_var.set(end_date.strftime("%Y-%m-%d"))
+        except Exception as e:
+            self.log_message(f"设置日期范围时出错: {e}")
 
     def refresh_data_list(self):
         """刷新数据列表"""
         try:
-            # 清空现有数据
-            for item in self.data_tree.get_children():
-                self.data_tree.delete(item)
-            
-            # 获取本地数据列表
-            data_list = self.data_manager.get_local_data_list()
-            
-            # 填充数据到Treeview
-            for data_info in data_list:
-                self.data_tree.insert("", "end", values=(
-                    data_info['symbol'],
-                    data_info['timeframe'],
-                    f"{data_info['count']:,}",
-                    data_info['start_date'],
-                    data_info['end_date']
-                ))
-            
-            # 只有在log_text存在时才记录日志
-            if hasattr(self, 'log_text'):
-                self.log_message(f"已刷新数据列表，共 {len(data_list)} 个数据集")
-            
+            if hasattr(self, 'data_tree'):
+                # 清空现有数据
+                for item in self.data_tree.get_children():
+                    self.data_tree.delete(item)
+                
+                # 获取本地数据列表
+                data_list = self.data_manager.get_local_data_list()
+                
+                # 填充数据到Treeview
+                for data_info in data_list:
+                    self.data_tree.insert('', 'end', values=(
+                        data_info['symbol'],
+                        data_info['timeframe'],
+                        data_info['count'],
+                        data_info['start_date'],
+                        data_info['end_date']
+                    ))
+                
+                if hasattr(self, 'log_text'):
+                    self.log_message(f"已刷新数据列表，共 {len(data_list)} 个数据集")
         except Exception as e:
-            # 只有在log_text存在时才记录错误日志
             if hasattr(self, 'log_text'):
                 self.log_message(f"刷新数据列表时出错: {e}")
 
-    def start_backtest(self):
-        strategy_name = self.backtest_strategy_var.get()
-        symbol = self.backtest_symbol_var.get()
-        timeframe_str = self.backtest_tf_var.get()
-        start_date_str = self.backtest_start_var.get()
-        end_date_str = self.backtest_end_var.get()
-
-        if not all([strategy_name, symbol, timeframe_str, start_date_str, end_date_str]) or strategy_name == '(无可用策略)':
-            messagebox.showerror("错误", "所有回测参数都必须填写。")
-            return
-
-        # 检查所需数据是否存在
-        self.start_backtest_btn.config(state="disabled")
-        self.update_backtest_results("正在检查所需数据...\n", overwrite=True)
-        
-        # 检查数据是否存在
-        data_exists = self.check_backtest_data(symbol, timeframe_str, start_date_str, end_date_str)
-        
-        if not data_exists:
-            # 数据不存在，询问用户是否要同步数据
-            result = messagebox.askyesno(
-                "数据缺失", 
-                f"回测所需的数据 {symbol} {timeframe_str} ({start_date_str} 到 {end_date_str}) 不存在。\n\n是否要自动同步这些数据？\n\n点击'是'将跳转到数据中心进行数据同步。"
-            )
-            
-            if result:
-                # 跳转到数据中心标签页
-                self.switch_to_data_center_tab(symbol, timeframe_str, start_date_str, end_date_str)
-                self.start_backtest_btn.config(state="normal")
-                return
-            else:
-                self.start_backtest_btn.config(state="normal")
-                return
-
-        self.update_backtest_results("数据检查通过，正在准备回测环境...\n", overwrite=True)
-        
-        # 获取回测参数
-        initial_cash = self.backtest_initial_cash_var.get()
-        leverage = self.backtest_leverage_var.get()
-        
-        # 验证参数
-        try:
-            initial_cash = float(initial_cash)
-            leverage = int(leverage)
-            if initial_cash <= 0 or leverage <= 0:
-                raise ValueError("初始资金和杠杆倍数必须大于0")
-        except ValueError as e:
-            messagebox.showerror("错误", f"回测参数无效: {e}")
-            self.start_backtest_btn.config(state="normal")
-            return
-        
-        self.log_message(f"开始回测策略 {strategy_name} on {symbol} {timeframe_str} (初始资金: ${initial_cash}, 杠杆: {leverage}x)...")
-
-        thread = threading.Thread(target=self._run_backtest_task, args=(strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage))
-        thread.daemon = True
-        thread.start()
-
-    def check_backtest_data(self, symbol, timeframe_str, start_date_str, end_date_str):
-        """检查回测所需的数据是否存在"""
-        try:
-            data = self.data_manager.get_data(symbol, timeframe_str, start_date_str, end_date_str)
-            return data is not None and not data.empty
-        except Exception as e:
-            self.log_message(f"检查数据时出错: {e}")
-            return False
-
-    def switch_to_data_center_tab(self, symbol, timeframe_str, start_date_str, end_date_str):
-        """跳转到数据中心标签页并预填充参数"""
-        # 找到数据中心标签页
-        for i in range(self.nametowidget('.!notebook').index('end')):
-            tab_text = self.nametowidget('.!notebook').tab(i, 'text')
-            if tab_text == "数据中心":
-                self.nametowidget('.!notebook').select(i)
-                break
-        
-        # 预填充参数
-        if hasattr(self, 'data_symbol_vars') and symbol in self.data_symbol_vars:
-            self.data_symbol_vars[symbol].set(True)
-        
-        if hasattr(self, 'data_timeframe_vars') and timeframe_str in self.data_timeframe_vars:
-            self.data_timeframe_vars[timeframe_str].set(True)
-        
-        if hasattr(self, 'data_start_date_var'):
-            self.data_start_date_var.set(start_date_str)
-        
-        if hasattr(self, 'data_end_date_var'):
-            self.data_end_date_var.set(end_date_str)
-        
-        self.log_message(f"已跳转到数据中心，请点击'开始同步数据'按钮")
-
-    def update_backtest_strategy_list(self):
-        """更新回测策略列表"""
-        try:
-            strategy_names = sorted(self.available_strategies.keys()) if self.available_strategies else ['(无可用策略)']
-            self.backtest_strategy_selector['values'] = strategy_names
-            if strategy_names and strategy_names[0] != '(无可用策略)':
-                self.backtest_strategy_selector.current(0)
-        except Exception as e:
-            self.log_message(f"更新回测策略列表时出错: {e}")
-
     def auto_sync_backtest_data(self):
-        """一键同步回测所需的数据"""
+        """一键同步回测数据"""
         try:
-            # 检查回测标签页的参数
-            if not (hasattr(self, 'backtest_symbol_var') and hasattr(self, 'backtest_tf_var') and 
-                   hasattr(self, 'backtest_start_var') and hasattr(self, 'backtest_end_var')):
-                messagebox.showwarning("提示", "请先在策略回测标签页设置回测参数。")
+            # 检查回测参数是否已设置
+            if not hasattr(self, 'backtest_symbol_var') or not hasattr(self, 'backtest_tf_var'):
+                messagebox.showwarning("警告", "请先在策略回测标签页设置回测参数")
                 return
             
             symbol = self.backtest_symbol_var.get()
             timeframe = self.backtest_tf_var.get()
-            start_date = self.backtest_start_var.get()
-            end_date = self.backtest_end_var.get()
+            start_date = self.backtest_start_var.get() if hasattr(self, 'backtest_start_var') else ""
+            end_date = self.backtest_end_var.get() if hasattr(self, 'backtest_end_var') else ""
             
-            if not all([symbol, timeframe, start_date, end_date]) or symbol == '(无可用策略)':
-                messagebox.showwarning("提示", "请先在策略回测标签页完整设置回测参数。")
+            if not symbol or not timeframe or not start_date or end_date or symbol == '(无可用策略)':
+                messagebox.showwarning("警告", "请先在策略回测标签页设置完整的回测参数")
                 return
             
             # 检查数据是否已存在
@@ -2291,75 +2994,175 @@ class TradeCopierApp(ThemedTk):
             # 自动填充参数
             if symbol in self.data_symbol_vars:
                 self.data_symbol_vars[symbol].set(True)
-            
             if timeframe in self.data_timeframe_vars:
                 self.data_timeframe_vars[timeframe].set(True)
-            
             self.data_start_date_var.set(start_date)
             self.data_end_date_var.set(end_date)
             
-            # 自动开始同步
+            # 开始同步
             self.start_data_sync()
-            
             messagebox.showinfo("提示", f"已自动开始同步 {symbol} {timeframe} 的数据，请等待同步完成。")
             
         except Exception as e:
             messagebox.showerror("错误", f"一键同步失败: {e}")
 
-    def _run_backtest_task(self, strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage):
+    def check_backtest_data(self, symbol, timeframe_str, start_date_str, end_date_str):
+        """检查回测数据是否存在"""
         try:
-            strategy_info = self.available_strategies[strategy_name]
-            strategy_info['module_name'] = os.path.basename(strategy_info['path']).replace('.py', '')
+            data = self.data_manager.get_data(symbol, timeframe_str, start_date_str, end_date_str)
+            return data is not None and not data.empty
+        except Exception as e:
+            self.log_message(f"检查数据时出错: {e}")
+            return False
 
-            dummy_account_id = "backtest_config"
-            acc_config = {'account_id': dummy_account_id}
-            params = self._prepare_strategy_params(acc_config, {}, strategy_info)
+    def switch_to_data_center_tab(self, symbol, timeframe_str, start_date_str, end_date_str):
+        """切换到数据中心标签页并预填参数"""
+        try:
+            # 找到数据中心标签页
+            for i in range(self.notebook.index("end")):
+                tab_text = self.notebook.tab(i, "text")
+                if "数据中心" in tab_text:
+                    self.notebook.select(i)
+                    break
+            
+            # 预填参数
+            if hasattr(self, 'data_symbol_vars') and symbol in self.data_symbol_vars:
+                self.data_symbol_vars[symbol].set(True)
+            if hasattr(self, 'data_timeframe_vars') and timeframe_str in self.data_timeframe_vars:
+                self.data_timeframe_vars[timeframe_str].set(True)
+            if hasattr(self, 'data_start_date_var'):
+                self.data_start_date_var.set(start_date_str)
+            if hasattr(self, 'data_end_date_var'):
+                self.data_end_date_var.set(end_date_str)
+            
+            self.log_message(f"已跳转到数据中心，请点击'开始同步数据'按钮")
+            
+        except Exception as e:
+            self.log_message(f"切换标签页时出错: {e}")
 
-            # 将更新UI的任务放入主线程队列
-            self.after(0, lambda: self.update_backtest_results("正在从本地数据仓库获取数据...", overwrite=True))
+    def _auto_sync_data_for_backtest(self, symbol, timeframe_str, start_date_str, end_date_str, strategy_name, initial_cash, leverage):
+        """自动同步回测所需的数据"""
+        try:
+            self.after(0, lambda: self.update_backtest_results("正在连接MT5服务器...\n", overwrite=False))
+            
+            # 创建数据同步任务
+            sync_task = {
+                'symbols': [symbol],
+                'timeframes': [timeframe_str],
+                'start_date': start_date_str,
+                'end_date': end_date_str
+            }
+            
+            # 将任务放入队列
+            data_task_queue.put(sync_task)
+            
+            # 等待数据同步完成
+            self.after(0, lambda: self.update_backtest_results("正在下载历史数据，请稍候...\n", overwrite=False))
+            
+            # 监控数据同步进度
+            sync_start_time = time.time()
+            max_wait_time = 300  # 最多等待5分钟
+            
+            while time.time() - sync_start_time < max_wait_time:
+                # 检查数据是否已同步完成
+                if self.check_backtest_data(symbol, timeframe_str, start_date_str, end_date_str):
+                    self.after(0, lambda: self.update_backtest_results("数据同步完成，开始回测...\n", overwrite=False))
+                    # 数据同步完成，启动回测
+                    self.after(0, lambda: self._run_backtest_task(strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage))
+                    return
+                
+                time.sleep(2)  # 每2秒检查一次
+            
+            # 超时处理
+            self.after(0, lambda: self.update_backtest_results("数据同步超时，请检查网络连接或手动同步数据。\n", overwrite=False))
+            self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
+            
+        except Exception as e:
+            error_msg = f"自动数据同步失败: {e}\n请手动在数据中心同步数据后重试。"
+            self.after(0, lambda: self.update_backtest_results(error_msg, overwrite=False))
+            self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
 
-            # 【关键关联点 1】：通过 DataManager 获取数据
+    def _run_backtest_with_auto_sync(self, strategy_name, symbol, timeframe_str, start_date_str, end_date_str, initial_cash, leverage):
+        """带自动数据同步的回测执行"""
+        try:
+            # 首先尝试获取数据
             full_data = self.data_manager.get_data(symbol, timeframe_str, start_date_str, end_date_str)
             
             if full_data is None or full_data.empty:
-                error_msg = f"在本地数据仓库中没有找到 {symbol} {timeframe_str} 在 {start_date_str} 到 {end_date_str} 期间的数据。\n请先在数据中心同步相关数据。"
-                self.after(0, lambda: self.update_backtest_results(error_msg, overwrite=True))
+                # 数据不存在，自动同步
+                self.after(0, lambda: self.update_backtest_results("数据不存在，正在自动同步...\n", overwrite=False))
+                
+                # 创建同步任务
+                sync_task = {
+                    'symbols': [symbol],
+                    'timeframes': [timeframe_str],
+                    'start_date': start_date_str,
+                    'end_date': end_date_str
+                }
+                data_task_queue.put(sync_task)
+                
+                # 等待同步完成并重试
+                time.sleep(5)  # 等待5秒让同步开始
+                full_data = self.data_manager.get_data(symbol, timeframe_str, start_date_str, end_date_str)
+                
+                if full_data is None or full_data.empty:
+                    error_msg = f"无法获取 {symbol} {timeframe_str} 数据，请检查网络连接或手动同步数据。"
+                    self.after(0, lambda: self.update_backtest_results(error_msg, overwrite=True))
+                    return
+            
+            # 数据获取成功，继续回测
+            self.after(0, lambda: self.update_backtest_results(f"成功获取 {len(full_data)} 条K线数据，正在初始化回测引擎...\n", overwrite=False))
+            
+            # 获取策略信息
+            if strategy_name not in self.available_strategies:
+                self.after(0, lambda: self.update_backtest_results(f"错误: 找不到策略 {strategy_name}", overwrite=True))
                 return
-
-            self.after(0, lambda: self.update_backtest_results(f"成功获取 {len(full_data)} 条K线数据，正在初始化回测引擎...", overwrite=True))
-
-            # 【关键关联点 2】：将数据传递给回测引擎
+            
+            strategy_info = self.available_strategies[strategy_name]
+            
+            # 获取策略的默认参数配置
+            default_params = strategy_info.get('params_config', {})
+            
+            # 构建完整的参数，使用策略默认值
+            params = {}
+            for param_name, param_config in default_params.items():
+                if param_name == 'symbol':
+                    params[param_name] = symbol
+                elif param_name == 'timeframe':
+                    params[param_name] = timeframe_str
+                else:
+                    params[param_name] = param_config.get('default', 0)
+            
+            # 确保必要的参数存在
+            if 'trade_volume' not in params:
+                params['trade_volume'] = 0.01
+            if 'magic_number' not in params:
+                params['magic_number'] = 13579
+            if 'stop_loss_pips' not in params:
+                params['stop_loss_pips'] = 50
+            if 'take_profit_pips' not in params:
+                params['take_profit_pips'] = 100
+            
+            # 创建回测器
             backtester = Backtester(
                 strategy_info=strategy_info,
-                full_data=full_data,  # 直接传递数据，而不是让回测引擎自己去下载
+                full_data=full_data,
                 params=params,
                 config=self.app_config,
                 log_queue=log_queue,
-                start_cash=float(initial_cash),  # 使用用户设置的初始资金
-                leverage=int(leverage)  # 使用用户设置的杠杆
+                start_cash=float(initial_cash),
+                leverage=int(leverage)
             )
             
+            # 运行回测
             results = backtester.run()
-
             self.after(0, lambda: self.update_backtest_results(results, overwrite=True))
-
+            
         except Exception as e:
-            import traceback
-            error_message = f"回测过程中发生错误：\n{traceback.format_exc()}"
-            self.log_message(error_message)
-            self.after(0, lambda: self.update_backtest_results(error_message, overwrite=True))
+            error_msg = f"回测过程中发生错误: {e}\n{traceback.format_exc()}"
+            self.after(0, lambda: self.update_backtest_results(error_msg, overwrite=True))
         finally:
             self.after(0, lambda: self.start_backtest_btn.config(state="normal"))
-
-    def update_backtest_results(self, message, overwrite=False):
-        def task():
-            self.backtest_results_text.config(state="normal")
-            if overwrite:
-                self.backtest_results_text.delete('1.0', tk.END)
-            self.backtest_results_text.insert(tk.END, message + "\n")
-            self.backtest_results_text.see(tk.END)
-            self.backtest_results_text.config(state="disabled")
-        self.after(0, task)
 
 
 if __name__ == "__main__":
