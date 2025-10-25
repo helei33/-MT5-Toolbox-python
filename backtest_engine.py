@@ -1,386 +1,132 @@
-# backtest_engine.py
-
-import pandas as pd
-import numpy as np
-from queue import Queue
-from collections import namedtuple
 import time
-import uuid
-import importlib.util
-import sys
+from queue import Queue
+import pandas as pd
 
-# 模拟MT5的Position对象，方便策略代码复用
-SimulatedPosition = namedtuple('SimulatedPosition', [
-    'ticket', 'symbol', 'type', 'volume', 'price_open', 'sl', 'tp', 'price_current', 'profit', 'magic'
-])
+# 导入我们重构的组件和类型
+from events import MarketEvent, SignalEvent, OrderEvent, FillEvent
+from backtest_components import DuckDBDataHandler, Portfolio, SimulatedExecutionHandler
+from backtest_gateway import BacktestTradingGateway
+from strategy import Strategy
 
-# 模拟MT5的SymbolInfo对象
-SimulatedSymbolInfo = namedtuple('SimulatedSymbolInfo', ['point'])
+# 导入一个重构后的策略作为示例
+from strategies.dual_ma_crossover_strategy import DualMaCrossoverStrategy
 
-class SimulatedPortfolio:
+class EventDrivenBacktester:
     """
-    模拟投资组合，负责管理回测中的虚拟资产、持仓和交易历史。
+    事件驱动回测引擎主类。
+    负责初始化所有组件，并运行主事件循环。
     """
-    def __init__(self, start_cash=10000.0, leverage=100):
-        self.start_cash = start_cash
-        self.cash = start_cash
-        self.equity = start_cash
-        self.leverage = leverage
-        self.positions = {}  # 使用字典存储持仓，key为ticket
-        self.trade_history = []
-        self.point_size = {} # 缓存每个symbol的point大小
+    def __init__(self, strategy_class, symbol: str, timeframe: str, start_date: str, end_date: str, initial_cash: float):
+        self.strategy_class = strategy_class
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.start_date = start_date
+        self.end_date = end_date
+        self.initial_cash = initial_cash
 
-    def _get_point_size(self, symbol):
-        # 简化处理，实际应从symbol info获取
-        if symbol not in self.point_size:
-            if "JPY" in symbol:
-                self.point_size[symbol] = 0.001
-            else:
-                self.point_size[symbol] = 0.00001
-        return self.point_size[symbol]
-
-    def on_bar(self, bar_data):
-        """
-        在每个新的K线数据上调用，处理持仓更新和SL/TP检查。
-        bar_data 是一个包含 'symbol', 'high', 'low', 'close' 的 Series/dict
-        """
-        positions_to_close = []
-        current_equity = self.cash
-        
-        for ticket, pos in list(self.positions.items()):
-            # 更新当前价格和浮动盈亏
-            profit = 0
-            if pos['type'] == 0: # 0 for buy
-                profit = (bar_data['close'] - pos['price_open']) * pos['volume'] * 100000 # 简化计算
-            else: # 1 for sell
-                profit = (pos['price_open'] - bar_data['close']) * pos['volume'] * 100000 # 简化计算
-            
-            self.positions[ticket]['profit'] = profit
-            self.positions[ticket]['price_current'] = bar_data['close']
-
-            # 检查SL/TP
-            close_price = None
-            if pos['type'] == 0: # Buy
-                if pos['sl'] > 0 and bar_data['low'] <= pos['sl']:
-                    close_price = pos['sl']
-                elif pos['tp'] > 0 and bar_data['high'] >= pos['tp']:
-                    close_price = pos['tp']
-            else: # Sell
-                if pos['sl'] > 0 and bar_data['high'] >= pos['sl']:
-                    close_price = pos['sl']
-                elif pos['tp'] > 0 and bar_data['low'] <= pos['tp']:
-                    close_price = pos['tp']
-            
-            if close_price:
-                positions_to_close.append((ticket, close_price))
-
-            current_equity += profit
-
-        # 执行平仓
-        for ticket, close_price in positions_to_close:
-            if ticket in self.positions:
-                self.close_position(ticket, close_price)
-
-        self.equity = current_equity
-
-
-    def execute_trade(self, order_type, symbol, volume, price, sl, tp, magic):
-        """
-        执行一个模拟交易。
-        order_type: 0 for buy, 1 for sell
-        """
-        margin_required = (volume * 100000 * price) / self.leverage
-        if self.equity - margin_required < 0:
-            print(f"Backtest Warning: Not enough margin to execute trade on {symbol}")
-            return None
-
-        ticket = str(uuid.uuid4())
-        position = {
-            'ticket': ticket, 'symbol': symbol, 'type': order_type, 'volume': volume,
-            'price_open': price, 'sl': sl, 'tp': tp, 'magic': magic,
-            'open_time': time.time(), 'price_current': price, 'profit': 0.0
-        }
-        self.positions[ticket] = position
-        return position
-
-    def close_position(self, ticket, close_price):
-        """
-        平仓一个现有持仓。
-        """
-        if ticket not in self.positions:
-            return False
-            
-        pos = self.positions.pop(ticket)
-        
-        profit = 0
-        if pos['type'] == 0: # Buy
-            profit = (close_price - pos['price_open']) * pos['volume'] * 100000
-        else: # Sell
-            profit = (pos['price_open'] - close_price) * pos['volume'] * 100000
-            
-        self.cash += profit
-        
-        closed_trade = pos.copy()
-        closed_trade.update({'close_price': close_price, 'close_time': time.time(), 'profit': profit})
-        self.trade_history.append(closed_trade)
-        return True
-
-    def get_positions(self, symbol=None, magic=None):
-        """
-        返回符合条件的当前模拟持仓列表 (以namedtuple格式)。
-        """
-        result = []
-        for pos in self.positions.values():
-            if (symbol is None or pos['symbol'] == symbol) and (magic is None or pos['magic'] == magic):
-                result.append(SimulatedPosition(**pos))
-        return result
-
-class BacktestStrategyBase:
-    """
-    模拟的策略基类，伪装成core_utils.BaseStrategy，为策略提供模拟的MT5 API。
-    """
-    def __init__(self, config, log_queue, params):
-        self.config = config
-        self.log_queue = log_queue
-        self.params = params
-        self.full_data = None
-        self.portfolio = None
-        self.current_bar_index = 0
-        self.mt5 = self
-        self.active = True
-        
-        # 初始化MT5常量
-        self._init_mt5_constants()
-
-    def _init_mt5_constants(self):
-        """初始化MT5常量"""
-        # 时间周期常量
-        self.TIMEFRAME_M1 = 1
-        self.TIMEFRAME_M2 = 2
-        self.TIMEFRAME_M3 = 3
-        self.TIMEFRAME_M4 = 4
-        self.TIMEFRAME_M5 = 5
-        self.TIMEFRAME_M6 = 6
-        self.TIMEFRAME_M10 = 10
-        self.TIMEFRAME_M12 = 12
-        self.TIMEFRAME_M15 = 15
-        self.TIMEFRAME_M20 = 20
-        self.TIMEFRAME_M30 = 30
-        self.TIMEFRAME_H1 = 16385
-        self.TIMEFRAME_H2 = 16386
-        self.TIMEFRAME_H3 = 16387
-        self.TIMEFRAME_H4 = 16388
-        self.TIMEFRAME_H6 = 16390
-        self.TIMEFRAME_H8 = 16392
-        self.TIMEFRAME_H12 = 16396
-        self.TIMEFRAME_D1 = 16408
-        self.TIMEFRAME_W1 = 32769
-        self.TIMEFRAME_MN1 = 49153
-        
-        # 订单类型常量
-        self.ORDER_TYPE_BUY = 0
-        self.ORDER_TYPE_SELL = 1
-        self.ORDER_TYPE_BUY_LIMIT = 2
-        self.ORDER_TYPE_SELL_LIMIT = 3
-        self.ORDER_TYPE_BUY_STOP = 4
-        self.ORDER_TYPE_SELL_STOP = 5
-        
-        # 持仓类型常量
-        self.POSITION_TYPE_BUY = 0
-        self.POSITION_TYPE_SELL = 1
-        
-        # 交易操作常量
-        self.TRADE_ACTION_DEAL = 1
-        self.TRADE_ACTION_PENDING = 5
-        self.TRADE_ACTION_SLTP = 6
-        self.TRADE_ACTION_MODIFY = 7
-        self.TRADE_ACTION_REMOVE = 8
-        
-        # 交易请求结果
-        self.TRADE_RETCODE_DONE = 10009
-        self.TRADE_RETCODE_REJECT = 10004
-        self.TRADE_RETCODE_ERROR = 10027
-        self.TRADE_RETCODE_INVALID = 10007
-
-    def stop(self):
-        self.active = False
-
-    def copy_rates_from_pos(self, symbol, timeframe, start_pos, count):
-        end_index = self.current_bar_index + 1
-        start_index = max(0, end_index - count)
-        return self.full_data.iloc[start_index:end_index].to_records(index=False)
-
-    def symbol_info_tick(self, symbol):
-        current_bar = self.full_data.iloc[self.current_bar_index]
-        return namedtuple('Tick', ['ask', 'bid'])(current_bar.close, current_bar.close)
-
-    def symbol_info(self, symbol):
-        point = self.portfolio._get_point_size(symbol)
-        return SimulatedSymbolInfo(point=point)
-
-    def get_positions(self, symbol=None, magic=None):
-        return self.portfolio.get_positions(symbol=symbol, magic=magic)
-
-    def buy(self, symbol, volume, sl=0.0, tp=0.0, magic=0, comment=""):
-        price = self.full_data.iloc[self.current_bar_index].close
-        return self.portfolio.execute_trade(0, symbol, volume, price, sl, tp, magic)
-
-    def sell(self, symbol, volume, sl=0.0, tp=0.0, magic=0, comment=""):
-        price = self.full_data.iloc[self.current_bar_index].close
-        return self.portfolio.execute_trade(1, symbol, volume, price, sl, tp, magic)
-
-    def close_position(self, ticket, comment=""):
-        price = self.full_data.iloc[self.current_bar_index].close
-        return self.portfolio.close_position(ticket, price)
-
-    def log(self, message):
-        """记录日志消息"""
-        if hasattr(self, 'log_queue') and self.log_queue:
-            self.log_queue.put(f"[Strategy] {message}")
-
-    def symbol_select(self, symbol, enable):
-        """模拟MT5的symbol_select方法"""
-        return True  # 在回测中总是返回True
-
-    def history_deals_get(self, from_ticket=0, count=100):
-        """获取历史成交记录（模拟）"""
-        if not hasattr(self, 'portfolio') or not self.portfolio:
-            return None
-        
-        # 从投资组合的交易历史中获取成交记录
-        deals = []
-        for trade in self.portfolio.trade_history:
-            # 创建模拟的成交记录对象
-            deal = type('Deal', (), {
-                'ticket': trade['ticket'],
-                'magic': trade['magic'],
-                'entry': 1 if trade['action'] == 'close' else 0,  # 0=开仓, 1=平仓
-                'profit': trade.get('profit', 0.0),
-                'swap': trade.get('swap', 0.0),
-                'commission': trade.get('commission', 0.0),
-                'symbol': trade['symbol'],
-                'type': trade['type'],
-                'volume': trade['volume'],
-                'price': trade['price'],
-                'time': trade.get('time', 0)
-            })()
-            deals.append(deal)
-        
-        return deals
-
-    def on_init(self): pass
-    def on_tick(self): raise NotImplementedError("Strategy must implement on_tick")
-    def on_deinit(self): pass
-
-class Backtester:
-    """
-    回测器主类，负责加载策略、循环数据并生成结果。
-    """
-    def __init__(self, strategy_info, full_data, params, config, log_queue, start_cash=10000.0, leverage=100, stop_event=None, pause_event=None):
-        self.log_queue = log_queue
-        self.portfolio = SimulatedPortfolio(start_cash=start_cash, leverage=leverage)
-        self.full_data = full_data
+        self.events = Queue()
         self.strategy = None
-        self.stop_event = stop_event
-        self.pause_event = pause_event
 
-        self._prepare_strategy(strategy_info, config, params)
+        self._setup_components()
 
-    def _prepare_strategy(self, strategy_info, config, params):
-        self.log_queue.put(f"[Backtester] 正在加载策略: {strategy_info['path']}...")
-        spec = importlib.util.spec_from_file_location(strategy_info['module_name'], strategy_info['path'])
-        module = importlib.util.module_from_spec(spec)
+    def _setup_components(self):
+        """初始化所有回测组件。"""
+        print("Initializing backtest components...")
         
-        module.BaseStrategy = BacktestStrategyBase 
-        sys.modules[strategy_info['module_name']] = module
-        spec.loader.exec_module(module)
+        # 1. 数据处理器 (Data Handler)
+        self.data_handler = DuckDBDataHandler(self.events, [self.symbol], self.timeframe, self.start_date, self.end_date)
 
-        StrategyClass = None
-        for item in dir(module):
-            obj = getattr(module, item)
-            if isinstance(obj, type) and issubclass(obj, BacktestStrategyBase) and obj is not BacktestStrategyBase:
-                StrategyClass = obj
-                break
+        # 2. 投资组合管理器 (Portfolio)
+        self.portfolio = Portfolio(self.events, self.data_handler, self.initial_cash)
+
+        # 3. 执行处理器 (Execution Handler)
+        self.execution_handler = SimulatedExecutionHandler(self.events, self.data_handler)
+
+        # 4. 回测交易网关 (Backtest Trading Gateway)
+        backtest_gateway = BacktestTradingGateway(self.events, self.portfolio, self.data_handler)
+
+        # 从策略类中提取默认参数
+        strategy_params = {k: v['default'] for k, v in self.strategy_class.strategy_params_config.items()}
+
+        # 5. 策略实例 (Strategy)
+        # 注意：我们将回测网关和参数注入到策略中
+        self.strategy = self.strategy_class(backtest_gateway, self.symbol, self.timeframe, params=strategy_params)
+        print("Components initialized successfully.")
+
+    def run_backtest(self):
+        """运行主事件循环。"""
+        print(f"\n--- Running Backtest for {self.strategy.strategy_name} ---")
+        print(f"Symbol: {self.symbol} | Timeframe: {self.timeframe} | Period: {self.start_date} to {self.end_date}\n")
         
-        if not StrategyClass:
-            raise ValueError(f"在策略文件 {strategy_info['path']} 中找不到策略类")
-
-        self.strategy = StrategyClass(config, self.log_queue, params)
-        self.strategy.full_data = self.full_data
-        self.strategy.portfolio = self.portfolio
-        self.log_queue.put("[Backtester] 策略加载成功。")
-
-    def run(self):
-        """
-        执行回测主循环。
-        """
-        self.log_queue.put("回测开始...")
         self.strategy.on_init()
 
-        for i in range(len(self.full_data)):
-            # 支持暂停
-            if self.pause_event is not None:
-                while self.pause_event.is_set():
-                    if self.stop_event is not None and self.stop_event.is_set():
-                        break
-                    time.sleep(0.05)
-            # 支持停止
-            if self.stop_event is not None and self.stop_event.is_set():
-                self.log_queue.put("收到停止指令，正在结束回测...")
+        # 启动事件循环，由第一个MarketEvent驱动
+        self.data_handler.update_bars()
+
+        while True:
+            if not self.data_handler.continue_backtest and self.events.empty():
                 break
-            self.strategy.current_bar_index = i
-            bar = self.full_data.iloc[i]
-            
-            self.portfolio.on_bar(bar)
-            
-            if self.strategy.active:
-                self.strategy.on_tick()
+
+            try:
+                event = self.events.get(block=False)
+            except self.events.empty():
+                # 如果事件队列为空，但数据还没完，就继续获取数据
+                self.data_handler.update_bars()
             else:
-                self.log_queue.put("策略已停止，结束回测。")
-                break
-        
+                if event is not None:
+                    if isinstance(event, MarketEvent):
+                        # 市场事件：更新投资组合，然后运行策略逻辑
+                        print(f"-- Market Event: {pd.to_datetime(event.time, unit='s')} --")
+                        self.portfolio.on_bar(event)
+                        self.strategy.on_bar(event)
+                        # 处理完市场事件后，立即请求下一个数据点
+                        self.data_handler.update_bars()
+
+                    elif isinstance(event, SignalEvent):
+                        # 信号事件：由投资组合处理
+                        print(f"-- Signal Event: {event.direction} {event.symbol} --")
+                        self.portfolio.on_signal(event)
+
+                    elif isinstance(event, OrderEvent):
+                        # 订单事件：由执行处理器处理
+                        print(f"-- Order Event: {event.direction} {event.quantity} {event.symbol} --")
+                        self.execution_handler.execute_order(event)
+
+                    elif isinstance(event, FillEvent):
+                        # 成交事件：由投资组合处理
+                        print(f"-- Fill Event: {event.direction} {event.quantity} {event.symbol} at {event.fill_price:.5f} --")
+                        self.portfolio.on_fill(event)
+
         self.strategy.on_deinit()
-        self.log_queue.put("回测完成。")
-        return self.get_results()
+        return self.generate_report()
 
-    def get_results(self):
-        """
-        分析交易历史并计算统计数据。
-        """
-        history = pd.DataFrame(self.portfolio.trade_history)
-        if history.empty:
-            return "回测完成，但未执行任何交易。"
+    def generate_report(self):
+        """生成并返回最终的回测报告字符串。"""
+        final_equity = self.portfolio.equity
+        total_return = (final_equity / self.initial_cash - 1) * 100
 
-        total_trades = len(history)
-        winning_trades = history[history['profit'] > 0]
-        losing_trades = history[history['profit'] <= 0]
-        
-        win_rate = len(winning_trades) / total_trades if total_trades > 0 else 0
-        total_pnl = history['profit'].sum()
-        
-        equity_curve = self.portfolio.start_cash + history['profit'].cumsum()
-        peak = equity_curve.expanding(min_periods=1).max()
-        drawdown = (equity_curve - peak) / peak
-        max_drawdown = drawdown.min()
-
-        report = f"""
-        --- 回测报告 ---
-        时间范围: {self.full_data.index[0].date()} to {self.full_data.index[-1].date()}
-        
-        初始净值: {self.portfolio.start_cash:,.2f}
-        最终净值:   {self.portfolio.equity:,.2f}
-        
-        总净盈亏:  {total_pnl:,.2f}
-        总回报率:   {(self.portfolio.equity / self.portfolio.start_cash - 1):.2%}
-
-        总交易数:   {total_trades}
-        胜率:       {win_rate:.2%}
-
-        平均盈利:       {winning_trades['profit'].mean():,.2f}
-        平均亏损:      {losing_trades['profit'].mean():,.2f}
-        盈亏比:   {abs(winning_trades['profit'].mean() / losing_trades['profit'].mean()) if len(losing_trades)>0 and losing_trades['profit'].mean()!=0 else np.inf:.2f}
-
-        最大回撤:   {max_drawdown:.2%}
-        ------------------------
-        """
+        report = (
+            "\n--- Backtest Finished ---\n"
+            f"Initial Cash: {self.initial_cash:,.2f}\n"
+            f"Final Equity:   {final_equity:,.2f}\n"
+            f"Total Return:   {total_return:.2f}%\n"
+            "-------------------------\n"
+        )
+        print(report)
         return report
+
+# --- 主程序入口 ---
+if __name__ == '__main__':
+    # 配置回测参数
+    backtest_config = {
+        "strategy_class": DualMaCrossoverStrategy,
+        "symbol": "EURUSD",
+        "timeframe": "H1",
+        "start_date": "2023-01-01",
+        "end_date": "2023-03-31",
+        "initial_cash": 10000.0
+    }
+
+    # 创建并运行回测
+    backtester = EventDrivenBacktester(**backtest_config)
+    backtester.run_backtest()

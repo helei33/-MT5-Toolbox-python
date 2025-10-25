@@ -5,27 +5,43 @@ import os
 from datetime import datetime, timedelta
 import MetaTrader5 as mt5
 import time
+import duckdb  # 导入 duckdb
+import re
 
-from constants import HDF5_FILE
+# 建议在 constants.py 中将 HDF5_FILE 更改为 DUCKDB_FILE
+# from constants import DUCKDB_FILE 
+# 为了方便，我们暂时在这里定义
+DUCKDB_FILE = 'data/market_data.duckdb'
+
 from mt5_utils import _connect_mt5
 
 class DataManager:
-    def __init__(self, data_path=HDF5_FILE):
-        """初始化数据管理器，指定HDF5文件路径。"""
+    def __init__(self, data_path=DUCKDB_FILE):
+        """初始化数据管理器，指定DuckDB文件路径。"""
         self.data_path = data_path
         # 确保数据文件所在的目录存在
         os.makedirs(os.path.dirname(self.data_path), exist_ok=True)
+        # print(f"[DataManager] 使用 DuckDB 数据库: {self.data_path}")
+
+    def _get_connection(self):
+        """获取一个DuckDB连接。"""
+        return duckdb.connect(database=self.data_path, read_only=False)
+
+    def _sanitize_name(self, name):
+        """将 symbol 和 timeframe 转换为有效的SQL表名。"""
+        # 移除非字母数字字符，替换为下划线
+        return re.sub(r'[^A-Za-z0-9_]+', '_', name)
+
+    def _get_table_name(self, symbol, timeframe_str):
+        """从 symbol 和 timeframe 生成标准化的表名。"""
+        return f"{self._sanitize_name(symbol)}_{self._sanitize_name(timeframe_str)}"
 
     def sync_data(self, symbols, timeframes, mt5_config, log_queue, start_date_str=None, end_date_str=None):
         """
-        同步多个交易品种和时间周期的数据。
-        该函数会检查本地HDF5文件中每组数据的最新时间戳，
-        然后只从MT5下载从该时间戳到现在的增量数据。
-        如果指定了时间范围，则下载指定范围内的数据。
+        同步多个交易品种和时间周期的数据到DuckDB。
         """
-        log_queue.put(f"[DataManager] 开始数据同步任务...")
+        log_queue.put(f"[DataManager] 开始数据同步任务 (数据库: DuckDB)...")
         
-        # 计算总的处理任务数量
         total_tasks = len(symbols) * len(timeframes)
         completed_tasks = 0
         
@@ -35,66 +51,81 @@ class DataManager:
             return False
 
         try:
-            for symbol in symbols:
-                for tf_str in timeframes:
-                    completed_tasks += 1
-                    log_queue.put(f"[DataManager] 正在处理 {symbol} - {tf_str}... (已下载 {completed_tasks}/{total_tasks})")
-                    key = f'{symbol.upper()}/{tf_str.upper()}'
-                    
-                    # 确定下载的时间范围
-                    if start_date_str and end_date_str:
-                        # 使用指定的时间范围
-                        start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
-                        end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
-                        log_queue.put(f"[DataManager] 使用指定时间范围: {start_date.date()} 到 {end_date.date()}")
-                    else:
-                        # 使用默认的增量同步逻辑
-                        start_date = datetime(2020, 1, 1) # 默认的起始下载日期
+            with self._get_connection() as conn:
+                for symbol in symbols:
+                    for tf_str in timeframes:
+                        completed_tasks += 1
+                        log_queue.put(f"[DataManager] 正在处理 {symbol} - {tf_str}... (进度 {completed_tasks}/{total_tasks})")
                         
-                        try:
-                            with pd.HDFStore(self.data_path, 'r') as store:
-                                if key in store:
-                                    # 如果数据已存在，找到最新的时间戳
-                                    last_time = store.select(key, start=-1).index[0]
-                                    # 从最后一条数据之后开始下载
-                                    start_date = last_time.to_pydatetime() + timedelta(minutes=1) 
+                        table_name = self._get_table_name(symbol, tf_str)
+                        
+                        # 确保表存在
+                        conn.execute(f"""
+                            CREATE TABLE IF NOT EXISTS {table_name} (
+                                time TIMESTAMP PRIMARY KEY,
+                                open DOUBLE,
+                                high DOUBLE,
+                                low DOUBLE,
+                                close DOUBLE,
+                                tick_volume BIGINT,
+                                spread INT,
+                                real_volume BIGINT
+                            )
+                        """)
+                        
+                        # 确定下载的时间范围
+                        if start_date_str and end_date_str:
+                            start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+                            end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
+                            log_queue.put(f"[DataManager] 使用指定时间范围: {start_date.date()} 到 {end_date.date()}")
+                        else:
+                            # 增量同步逻辑
+                            start_date = datetime(2020, 1, 1) # 默认的起始下载日期
+                            try:
+                                # 查找本地最新时间戳
+                                last_time_result = conn.execute(f"SELECT MAX(time) FROM {table_name}").fetchone()
+                                if last_time_result and last_time_result[0]:
+                                    last_time = last_time_result[0]
+                                    start_date = last_time + timedelta(minutes=1) # 从最后一条数据之后开始
                                     log_queue.put(f"[DataManager] 本地最新数据时间: {last_time}，将从之后开始同步。")
-                        except (KeyError, IndexError):
-                            log_queue.put(f"[DataManager] 本地没有找到 {key} 的数据，将从 {start_date.date()} 开始完整下载。")
-                        except Exception as e:
-                            log_queue.put(f"[DataManager] 读取本地数据时发生错误: {e}，将尝试完整下载。")
+                                else:
+                                     log_queue.put(f"[DataManager] 本地没有找到 {table_name} 的数据，将从 {start_date.date()} 开始完整下载。")
+                            except Exception as e:
+                                log_queue.put(f"[DataManager] 查询本地数据时发生错误: {e}，将尝试完整下载。")
+                            
+                            end_date = datetime.now()
+                        
+                        if start_date >= end_date:
+                            log_queue.put(f"[DataManager] {symbol} - {tf_str} 的数据已是最新，无需同步。")
+                            continue
 
-                        end_date = datetime.now()
-                    
-                    if start_date >= end_date:
-                        log_queue.put(f"[DataManager] {symbol} - {tf_str} 的数据已是最新，无需同步。")
-                        continue
+                        timeframe_mt5 = getattr(mt5, f"TIMEFRAME_{tf_str}")
+                        
+                        log_queue.put(f"[DataManager] 正在从MT5下载 {symbol} {tf_str} 数据...")
+                        rates = mt5_conn.copy_rates_range(symbol, timeframe_mt5, start_date, end_date)
+                        
+                        if rates is None or len(rates) == 0:
+                            log_queue.put(f"[DataManager] 未能获取 {symbol} 在 {tf_str} 的新数据。")
+                            continue
 
-                    timeframe_mt5 = getattr(mt5, f"TIMEFRAME_{tf_str}")
-                    
-                    # 请求数据
-                    log_queue.put(f"[DataManager] 正在从MT5下载 {symbol} {tf_str} 数据...")
-                    rates = mt5_conn.copy_rates_range(symbol, timeframe_mt5, start_date, end_date)
-                    
-                    if rates is None or len(rates) == 0:
-                        log_queue.put(f"[DataManager] 未能获取 {symbol} 在 {tf_str} 的新数据。")
-                        continue
+                        data_df = pd.DataFrame(rates)
+                        data_df['time'] = pd.to_datetime(data_df['time'], unit='s')
+                        
+                        # 在写入DuckDB时，列名必须完全匹配
+                        # MT5返回 'tick_volume', 'spread', 'real_volume'
+                        # 确保我们的表结构和DataFrame列名一致
+                        data_df = data_df[['time', 'open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']]
 
-                    # 转换数据为DataFrame
-                    data_df = pd.DataFrame(rates)
-                    data_df['time'] = pd.to_datetime(data_df['time'], unit='s')
-                    data_df.set_index('time', inplace=True)
-                    
-                    # 去重，防止下载的数据与本地最后一条数据重叠
-                    data_df = data_df[~data_df.index.duplicated(keep='first')]
-
-                    # 将新数据追加到HDF5文件
-                    with pd.HDFStore(self.data_path, 'a') as store:
-                        # 使用 'append' 模式来添加数据，但不为所有列创建索引
-                        store.append(key, data_df, format='table', data_columns=[])
-                    
-                    log_queue.put(f"[DataManager] 成功同步并追加了 {len(data_df)} 条 {symbol} ({tf_str}) 的K线数据。")
-                    time.sleep(0.5) # 短暂休眠，防止过于频繁地请求API
+                        # 使用 DuckDB 的高效方式插入数据，并自动处理重复（基于主键 'time'）
+                        conn.register('new_data_df', data_df)
+                        conn.execute(f"""
+                            INSERT INTO {table_name} 
+                            SELECT * FROM new_data_df
+                            ON CONFLICT(time) DO NOTHING
+                        """)
+                        
+                        log_queue.put(f"[DataManager] 成功同步并写入了 {len(data_df)} 条 {symbol} ({tf_str}) 的新数据。")
+                        time.sleep(0.5)
 
             log_queue.put("[DataManager] 所有数据同步任务完成。")
             return True
@@ -109,67 +140,88 @@ class DataManager:
 
     def get_data(self, symbol, timeframe_str, start_date, end_date):
         """
-        从HDF5文件中获取指定范围内的数据。
-        这是回测引擎的数据来源。
+        从DuckDB文件中获取指定范围内的数据。
         """
-        key = f'{symbol.upper()}/{timeframe_str.upper()}'
+        table_name = self._get_table_name(symbol, timeframe_str)
         
-        # 确保日期是datetime对象
         if isinstance(start_date, str):
             start_date = pd.to_datetime(start_date)
         if isinstance(end_date, str):
             end_date = pd.to_datetime(end_date)
 
         try:
-            with pd.HDFStore(self.data_path, 'r') as store:
-                if key not in store:
-                    print(f"[DataManager] 警告: 在本地数据文件 '{self.data_path}' 中没有找到键 '{key}'。")
+            # 使用 'read_only=True' 可以允许多个进程同时读取
+            with duckdb.connect(database=self.data_path, read_only=True) as conn:
+                
+                # 1. 检查表是否存在
+                table_check = conn.execute(f"SELECT 1 FROM information_schema.tables WHERE table_name = '{table_name}'").fetchone()
+                if not table_check:
+                    print(f"[DataManager] 警告: 在数据库 '{self.data_path}' 中没有找到表 '{table_name}'。")
                     return None
                 
-                # 根据日期范围筛选数据
-                # HDFStore的查询语法要求使用字符串
-                where_clause = f"index >= '{start_date}' and index <= '{end_date}'"
-                data = store.select(key, where=where_clause)
+                # 2. 查询数据
+                # 使用参数化查询防止SQL注入
+                query = f"""
+                    SELECT * FROM {table_name} 
+                    WHERE time >= ? AND time <= ?
+                    ORDER BY time
+                """
+                data = conn.execute(query, [start_date, end_date]).fetch_df()
                 
                 if data.empty:
-                    print(f"[DataManager] 警告: 在指定日期范围 {start_date.date()} 到 {end_date.date()} 内没有找到 {key} 的数据。")
+                    print(f"[DataManager] 警告: 在指定日期范围 {start_date.date()} 到 {end_date.date()} 内没有找到 {table_name} 的数据。")
                     return None
-                    
+                
+                # 3. 将 'time' 列设为索引，以匹配 backtest_engine 的期望
+                data.set_index('time', inplace=True)
                 return data
+                
         except Exception as e:
-            print(f"[DataManager] 从HDF5文件中读取数据时出错: {e}")
+            print(f"[DataManager] 从DuckDB文件中读取数据时出错: {e}")
             return None
 
     def get_local_data_list(self):
-        """扫描HDF5文件，返回所有已存储数据集的列表（symbol, timeframe, count, min_date, max_date）。"""
+        """扫描DuckDB，返回所有已存储数据集的列表。"""
         if not os.path.exists(self.data_path):
             return []
         
         datasets = []
         try:
-            with pd.HDFStore(self.data_path, 'r') as store:
-                for key in store.keys():
-                    parts = key.strip('/').split('/')
-                    if len(parts) == 2:
-                        symbol, timeframe = parts
-                        try:
-                            # 获取更详细的信息
-                            num_rows = store.get_storer(key).nrows
-                            # 为了获取日期范围，我们需要读取部分数据，这可能有点慢
-                            # 这里只读第一条和最后一条来获取范围
-                            first_date = store.select(key, start=0, stop=1).index[0].strftime('%Y-%m-%d')
-                            last_date = store.select(key, start=num_rows-1, stop=num_rows).index[0].strftime('%Y-%m-%d')
+            with duckdb.connect(database=self.data_path, read_only=True) as conn:
+                tables = conn.execute("SHOW TABLES").fetchall()
+                
+                for (table_name,) in tables:
+                    try:
+                        # 获取详细信息
+                        stats = conn.execute(f"""
+                            SELECT 
+                                COUNT(*), 
+                                MIN(time), 
+                                MAX(time) 
+                            FROM {table_name}
+                        """).fetchone()
+                        
+                        count, min_date, max_date = stats
+                        
+                        if count == 0:
+                            continue
                             
-                            datasets.append({
-                                'symbol': symbol, 
-                                'timeframe': timeframe,
-                                'count': num_rows,
-                                'start_date': first_date,
-                                'end_date': last_date
-                            })
-                        except (IndexError, KeyError) as e:
-                             print(f"[DataManager] 无法获取 {key} 的详细信息: {e}")
-                             continue
+                        # 尝试从表名解析回 symbol 和 timeframe (这依赖于 _get_table_name 的逻辑)
+                        # 这是一个简单的假设，可能需要根据你的命名规则调整
+                        parts = table_name.rsplit('_', 1)
+                        symbol = parts[0]
+                        timeframe = parts[1] if len(parts) > 1 else 'UNKNOWN'
+                        
+                        datasets.append({
+                            'symbol': symbol, 
+                            'timeframe': timeframe,
+                            'count': count,
+                            'start_date': min_date.strftime('%Y-%m-%d'),
+                            'end_date': max_date.strftime('%Y-%m-%d')
+                        })
+                    except Exception as e:
+                        print(f"[DataManager] 无法获取 {table_name} 的详细信息: {e}")
+                        continue
 
         except Exception as e:
             print(f"[DataManager] 扫描本地数据仓库时出错: {e}")
