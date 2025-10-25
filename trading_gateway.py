@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, Any
 import numpy as np
 
-from mt5_types import AccountInfo, SymbolInfo, Tick, TradeResult, PositionInfo, RatesDTO
+from models.mt5_types import AccountInfo, SymbolInfo, Tick, TradeResult, Position, RatesDTO
 
 class TradingGateway(ABC):
     """
@@ -67,7 +67,7 @@ class TradingGateway(ABC):
         pass
 
     @abstractmethod
-    def positions_get(self, symbol: Optional[str] = None) -> Tuple[PositionInfo, ...]:
+    def positions_get(self, symbol: Optional[str] = None) -> Tuple[Position, ...]:
         """
         获取当前持仓。
         :param symbol: 如果指定，则只返回该品种的持仓。

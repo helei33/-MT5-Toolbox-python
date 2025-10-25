@@ -1,5 +1,5 @@
-from strategy import Strategy
-from events import MarketEvent
+from models.strategy import Strategy
+from models.events import MarketEvent
 import time
 
 class AdvancedMartingaleV2(Strategy):

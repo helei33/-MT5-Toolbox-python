@@ -1,0 +1,159 @@
+2025-10-25 21:27:08,585 - MT5Toolbox - ERROR - 加载策略 advanced_martingale_v2 失败: No module named 'strategy'
+Traceback (most recent call last):
+  File "d:\学习笔记\桌面版跟单\MT5工具箱\services\strategy_service.py", line 85, in _discover_strategies
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "d:\学习笔记\桌面版跟单\MT5工具箱\strategies\advanced_martingale_v2.py", line 1, in <module>
+    from strategy import Strategy
+ModuleNotFoundError: No module named 'strategy'
+2025-10-25 21:27:08,955 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 21:27:09,281 - MT5Toolbox - ERROR - 加载策略 dual_ma_crossover_strategy 失败: No module named 'strategy'
+Traceback (most recent call last):
+  File "d:\学习笔记\桌面版跟单\MT5工具箱\services\strategy_service.py", line 85, in _discover_strategies
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "d:\学习笔记\桌面版跟单\MT5工具箱\strategies\dual_ma_crossover_strategy.py", line 5, in <module>
+    from strategy import Strategy
+ModuleNotFoundError: No module named 'strategy'
+2025-10-25 21:27:09,290 - MT5Toolbox - ERROR - 加载策略 eurusd_one_click_with_stops 失败: name 'BaseStrategy' is not defined
+Traceback (most recent call last):
+  File "d:\学习笔记\桌面版跟单\MT5工具箱\services\strategy_service.py", line 85, in _discover_strategies
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "d:\学习笔记\桌面版跟单\MT5工具箱\strategies\eurusd_one_click_with_stops.py", line 5, in <module>
+    class OneClickWithStopsStrategy(BaseStrategy):
+                                    ^^^^^^^^^^^^
+NameError: name 'BaseStrategy' is not defined
+2025-10-25 21:27:09,292 - MT5Toolbox - ERROR - 加载策略 lottery_ticket_strategy 失败: name 'BaseStrategy' is not defined
+Traceback (most recent call last):
+  File "d:\学习笔记\桌面版跟单\MT5工具箱\services\strategy_service.py", line 85, in _discover_strategies
+    spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1026, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "d:\学习笔记\桌面版跟单\MT5工具箱\strategies\lottery_ticket_strategy.py", line 6, in <module>
+    class LotteryTicketStrategy(BaseStrategy):
+                                ^^^^^^^^^^^^
+NameError: name 'BaseStrategy' is not defined
+2025-10-25 21:27:09,293 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 21:27:09,293 - root - INFO - 应用启动，核心服务已创建。 সন
+2025-10-25 21:27:51,809 - root - INFO - 应用程序正在关闭... সন
+2025-10-25 21:27:51,811 - MT5Toolbox - INFO - 正在停止核心服务...
+2025-10-25 21:27:51,814 - MT5Toolbox - INFO - 正在停止所有运行中的策略...
+2025-10-25 21:27:51,814 - MT5Toolbox - INFO - 所有策略已停止。
+2025-10-25 21:27:51,814 - MT5Toolbox - INFO - 跟单服务已停止。
+2025-10-25 21:27:51,814 - MT5Toolbox - INFO - 正在关闭所有MT5账户连接...
+2025-10-25 21:27:51,814 - MT5Toolbox - INFO - 核心服务已停止。
+2025-10-25 21:35:59,991 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 21:36:00,177 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 21:36:00,374 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 21:36:00,378 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 21:36:00,388 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 21:36:00,407 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 21:36:00,407 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 21:36:58,977 - root - INFO - 已发送跟单设置更新请求。
+2025-10-25 21:36:58,979 - MT5Toolbox - INFO - 跟单设置已更新: 手数=1.0, 反向=False
+2025-10-25 21:37:11,368 - root - INFO - 应用程序正在关闭...
+2025-10-25 21:37:11,369 - MT5Toolbox - INFO - 正在停止核心服务...
+2025-10-25 21:37:11,376 - MT5Toolbox - INFO - 正在停止所有运行中的策略...
+2025-10-25 21:37:11,376 - MT5Toolbox - INFO - 所有策略已停止。
+2025-10-25 21:37:11,376 - MT5Toolbox - INFO - 跟单服务已停止。
+2025-10-25 21:37:11,376 - MT5Toolbox - INFO - 正在关闭所有MT5账户连接...
+2025-10-25 21:37:11,376 - MT5Toolbox - INFO - 核心服务已停止。
+2025-10-25 21:38:12,531 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 21:38:12,725 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 21:38:12,918 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 21:38:12,919 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 21:38:12,919 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 21:38:12,920 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 21:38:12,920 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 21:38:22,640 - root - INFO - 应用程序正在关闭...
+2025-10-25 21:38:22,640 - MT5Toolbox - INFO - 正在停止核心服务...
+2025-10-25 21:38:22,646 - MT5Toolbox - INFO - 正在停止所有运行中的策略...
+2025-10-25 21:38:22,647 - MT5Toolbox - INFO - 所有策略已停止。
+2025-10-25 21:38:22,647 - MT5Toolbox - INFO - 跟单服务已停止。
+2025-10-25 21:38:22,647 - MT5Toolbox - INFO - 正在关闭所有MT5账户连接...
+2025-10-25 21:38:22,647 - MT5Toolbox - INFO - 核心服务已停止。
+2025-10-25 22:17:14,465 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 22:17:14,812 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 22:17:15,070 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 22:17:15,071 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 22:17:15,077 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 22:17:15,078 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 22:17:15,078 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 22:17:19,146 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 22:17:19,324 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 22:17:19,502 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 22:17:19,502 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 22:17:19,503 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 22:17:19,503 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 22:17:19,503 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 22:17:33,069 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 22:17:33,236 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 22:17:33,464 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 22:17:33,475 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 22:17:33,476 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 22:17:33,476 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 22:17:33,477 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 22:36:25,618 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 22:36:25,799 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 22:36:25,999 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 22:36:26,000 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 22:36:26,001 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 22:36:26,001 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 22:36:26,001 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 22:39:33,528 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 22:39:33,697 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 22:39:33,885 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 22:39:33,885 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 22:39:33,886 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 22:39:33,886 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 22:39:33,895 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 22:40:27,688 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 22:40:27,852 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 22:40:28,045 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 22:40:28,045 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 22:40:28,046 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 22:40:28,046 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 22:40:28,047 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 22:50:37,688 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 22:50:37,856 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 22:50:38,050 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 22:50:38,050 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 22:50:38,051 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 22:50:38,051 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 22:50:38,051 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 22:51:01,051 - root - INFO - 应用程序正在关闭...
+2025-10-25 22:51:01,051 - MT5Toolbox - INFO - 正在停止核心服务...
+2025-10-25 22:51:01,059 - MT5Toolbox - INFO - 正在停止所有运行中的策略...
+2025-10-25 22:51:01,059 - MT5Toolbox - INFO - 所有策略已停止。
+2025-10-25 22:51:01,059 - MT5Toolbox - INFO - 跟单服务已停止。
+2025-10-25 22:51:01,059 - MT5Toolbox - INFO - 正在关闭所有MT5账户连接...
+2025-10-25 22:51:01,059 - MT5Toolbox - INFO - 核心服务已停止。
+2025-10-25 22:57:13,195 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 22:57:13,361 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 22:57:13,547 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 22:57:13,548 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 22:57:13,548 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 22:57:13,549 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 22:57:13,549 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 23:00:24,902 - MT5Toolbox - INFO - 发现策略: advanced_martingale_v2 -> AdvancedMartingaleV2
+2025-10-25 23:00:25,091 - numexpr.utils - INFO - NumExpr defaulting to 12 threads.
+2025-10-25 23:00:25,306 - MT5Toolbox - INFO - 发现策略: dual_ma_crossover_strategy -> DualMaCrossoverStrategy
+2025-10-25 23:00:25,307 - MT5Toolbox - INFO - 发现策略: eurusd_one_click_with_stops -> OneClickWithStopsStrategy
+2025-10-25 23:00:25,307 - MT5Toolbox - INFO - 发现策略: lottery_ticket_strategy -> LotteryTicketStrategy
+2025-10-25 23:00:25,308 - MT5Toolbox - INFO - 核心服务工作线程已启动。
+2025-10-25 23:00:25,308 - root - INFO - 应用启动，核心服务已创建。
+2025-10-25 23:01:24,216 - root - INFO - 应用程序正在关闭...
+2025-10-25 23:01:24,216 - MT5Toolbox - INFO - 正在停止核心服务...
+2025-10-25 23:01:24,225 - MT5Toolbox - INFO - 正在停止所有运行中的策略...
+2025-10-25 23:01:24,225 - MT5Toolbox - INFO - 所有策略已停止。
+2025-10-25 23:01:24,225 - MT5Toolbox - INFO - 跟单服务已停止。
+2025-10-25 23:01:24,226 - MT5Toolbox - INFO - 正在关闭所有MT5账户连接...
+2025-10-25 23:01:24,226 - MT5Toolbox - INFO - 核心服务已停止。

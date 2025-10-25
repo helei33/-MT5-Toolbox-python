@@ -3,7 +3,7 @@ from typing import Optional, Tuple, Dict, Any
 import numpy as np
 
 from trading_gateway import TradingGateway
-from mt5_types import AccountInfo, SymbolInfo, Tick, TradeResult, PositionInfo, RatesDTO
+from models.mt5_types import AccountInfo, SymbolInfo, Tick, TradeResult, Position, RatesDTO
 
 class LiveTradingGateway(TradingGateway):
     """
@@ -86,7 +86,7 @@ class LiveTradingGateway(TradingGateway):
             return rates
         return None
 
-    def positions_get(self, symbol: Optional[str] = None, magic: Optional[int] = None) -> Tuple[PositionInfo, ...]:
+    def positions_get(self, symbol: Optional[str] = None, magic: Optional[int] = None) -> Tuple[Position, ...]:
         """获取持仓信息。"""
         kwargs = {}
         if symbol:
@@ -99,9 +99,9 @@ class LiveTradingGateway(TradingGateway):
         if positions is None:
             return tuple()
 
-        # 将MT5的Position对象元组转换为我们的PositionInfo dataclass元组
+        # 将MT5的Position对象元组转换为我们的Position dataclass元组
         return tuple(
-            PositionInfo(
+            Position(
                 ticket=p.ticket,
                 symbol=p.symbol,
                 volume=p.volume,

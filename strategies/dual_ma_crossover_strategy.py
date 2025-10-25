@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 
 # 1. 继承自新的 Strategy 基类
-from strategy import Strategy 
-from events import MarketEvent
+from models.strategy import Strategy 
+from models.events import MarketEvent
 
 class DualMaCrossoverStrategy(Strategy):
     """

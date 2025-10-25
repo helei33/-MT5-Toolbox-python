@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from trading_gateway import TradingGateway
-from events import MarketEvent
+from .events import MarketEvent
 
 class Strategy(ABC):
     """

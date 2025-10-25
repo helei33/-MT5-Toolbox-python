@@ -4,9 +4,6 @@ from logging.handlers import RotatingFileHandler
 from queue import Queue
 import os
 
-# The UI will listen to this queue for log messages
-log_queue = Queue()
-
 class QueueHandler(logging.Handler):
     """
     A custom logging handler that puts log records into a queue.
@@ -16,12 +13,13 @@ class QueueHandler(logging.Handler):
         self.queue = queue
 
     def emit(self, record):
-        # Only put the formatted message into the queue
-        self.queue.put(self.format(record))
+        # Put the raw record into the queue for the UI to format
+        self.queue.put(record)
 
-def setup_logging():
+def setup_logging(gui_queue: Queue):
     """
     Sets up the root logger for the entire application.
+    It now accepts a queue from the UI.
     """
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
@@ -42,8 +40,8 @@ def setup_logging():
     file_handler = RotatingFileHandler(os.path.join(logs_dir, 'app.log'), maxBytes=1024*1024*5, backupCount=2, encoding='utf-8')
     file_handler.setLevel(logging.INFO)
 
-    # 3. QueueHandler to send logs to the GUI
-    queue_handler = QueueHandler(log_queue)
+    # 3. QueueHandler to send logs to the GUI (using the provided queue)
+    queue_handler = QueueHandler(gui_queue)
     queue_handler.setLevel(logging.INFO)
 
     # --- Create formatter and add it to handlers ---
@@ -52,16 +50,11 @@ def setup_logging():
     stream_handler.setFormatter(detailed_formatter)
     file_handler.setFormatter(detailed_formatter)
 
-    # Formatter for the GUI queue
-    gui_formatter = logging.Formatter('%(asctime)s - %(message)s')
-    queue_handler.setFormatter(gui_formatter)
+    # The GUI will format its own messages, so the queue_handler doesn't need a formatter.
 
     # --- Add handlers to the logger ---
     logger.addHandler(stream_handler)
     logger.addHandler(file_handler)
     logger.addHandler(queue_handler)
 
-    return logger, log_queue
-
-# --- Create and export a global logger instance and the queue for the GUI ---
-logger, gui_log_queue = setup_logging()
+    return logger
